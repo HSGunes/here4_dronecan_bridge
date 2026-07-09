@@ -51,6 +51,18 @@ If you are using a budget USB-CAN adapter (like the **Waveshare USB-CAN-A**) via
 **Why?** Setting a parameter with a long name (like `IMU_SAMPLE_RATE`) forces the PC to blast 4 CAN frames instantly. Budget adapters have tiny hardware buffers that overflow, dropping the frames.
 **Our Fix:** We included a custom initialization script (`scripts/waveshare_socketcan_bridge.py`) that applies a micro-sleep (`time.sleep(0.002)`) between multi-frame DroneCAN transmissions, completely eliminating the timeouts!
 
+### How to Use the Custom Waveshare Bridge
+Instead of using the standard `slcand` daemon, run our setup script before launching the ROS node or the DroneCAN GUI Tool:
+
+```bash
+# 1. Make the setup script executable (only needed once)
+chmod +x src/here4_dronecan_bridge/scripts/setup_waveshare_can.sh
+
+# 2. Run the script with your adapter's USB port (usually /dev/ttyUSB0)
+sudo src/here4_dronecan_bridge/scripts/setup_waveshare_can.sh /dev/ttyUSB0
+```
+*(This script will automatically bring up the `can0` interface and run our patched python bridge in the background).*
+
 ---
 
 ## 🚀 Installation & Usage
