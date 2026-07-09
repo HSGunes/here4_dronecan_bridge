@@ -25,7 +25,7 @@ def generate_launch_description():
 
     uere_arg = DeclareLaunchArgument(
         'uere',
-        default_value='2.0',
+        default_value='0.5',
         description='User Equivalent Range Error (meters) for covariance'
     )
 

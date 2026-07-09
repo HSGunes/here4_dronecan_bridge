@@ -48,7 +48,7 @@ class Here4BridgeNode(Node):
         # --- Declare Parameters ---
         self.declare_parameter('can_interface', 'can0')
         self.declare_parameter('node_id', 10)
-        self.declare_parameter('uere', 2.0)  # User Equivalent Range Error for covariance
+        self.declare_parameter('uere', 0.5)  # User Equivalent Range Error for covariance
 
         self._can_interface = self.get_parameter('can_interface').get_parameter_value().string_value
         self._node_id = self.get_parameter('node_id').get_parameter_value().integer_value
