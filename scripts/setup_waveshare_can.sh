@@ -3,12 +3,27 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
-# Default serial port
-PORT="/dev/ttyUSB0"
-
-# Allow overriding serial port via command line argument
+# Port Auto-Detection
 if [ -n "$1" ]; then
     PORT="$1"
+else
+    echo "Port belirtilmedi. Otomatik olarak CH340 (Waveshare) cihazı aranıyor..."
+    PORT=""
+    for dev in /dev/ttyUSB* /dev/ttyACM*; do
+        if [ -e "$dev" ]; then
+            # Check if it's a CH340 (Vendor 1a86)
+            if udevadm info -q property -n "$dev" 2>/dev/null | grep -q "ID_VENDOR_ID=1a86"; then
+                PORT="$dev"
+            fi
+        fi
+    done
+    
+    if [ -z "$PORT" ]; then
+        PORT="/dev/ttyUSB0"
+        echo "UYARI: CH340 donanım kimliği bulunamadı, varsayılan $PORT deneniyor..."
+    else
+        echo "-> Otonom Tespit Başarılı: $PORT (CH340 Çipi Doğrulandı)"
+    fi
 fi
 
 echo "============================================="
@@ -57,7 +72,8 @@ sudo ip link set up can0
 
 # 6. Waveshare <-> SocketCAN Python Köprüsünün başlatılması
 echo "3. Python SocketCAN Köprüsü arka planda başlatılıyor..."
-sudo nohup python3 /home/gunes/robotaksi_ws/scripts/waveshare_socketcan_bridge.py "$PORT" can0 > /tmp/waveshare_bridge.log 2>&1 &
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+sudo nohup python3 "$SCRIPT_DIR/waveshare_socketcan_bridge.py" "$PORT" can0 > /tmp/waveshare_bridge.log 2>&1 &
 
 # 7. Sonuç doğrulaması
 echo "============================================="
