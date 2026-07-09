@@ -17,6 +17,20 @@ This package was developed specifically to solve the common pitfalls, bootloader
 
 ---
 
+## 🔌 Wiring & Schematic
+
+This package is designed to operate over a CAN bus. We strongly recommend using the budget-friendly [Waveshare USB-CAN-A](https://www.waveshare.com/wiki/USB-CAN-A) adapter to connect the sensor directly to your ROS computer (PC, Raspberry Pi, Jetson).
+
+### Physical Connections:
+**Here 4 CAN Port** <----------------> **Waveshare USB-CAN-A**
+- `CAN_H` (High)   <----------------> `CAN_H`
+- `CAN_L` (Low)    <----------------> `CAN_L`
+- `GND` (Ground)   <----------------> `GND`
+
+*Note on Power:* The Waveshare adapter does **not** provide 5V power over the CAN lines by default. You must supply 5V to the Here 4 sensor separately (either via a Power Distribution Board, a 5V BEC, or splicing USB 5V into the Here 4's power pins).
+
+---
+
 ## 🛠️ Hardware Configuration (DroneCAN GUI Tool) - CRITICAL!
 
 Out of the box, the Here 4 expects a Pixhawk to give it orders. If you connect it directly to a PC, it will get stuck in a "Rainbow LED" bootloader loop or refuse to send IMU data. **You MUST configure the sensor using the [DroneCAN GUI Tool](https://dronecan.github.io/GUI_Tool/Overview/) before using this ROS package.**
