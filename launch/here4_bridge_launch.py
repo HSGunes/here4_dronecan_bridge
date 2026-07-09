@@ -23,6 +23,12 @@ def generate_launch_description():
         description='DroneCAN node ID for this bridge node'
     )
 
+    uere_arg = DeclareLaunchArgument(
+        'uere',
+        default_value='2.0',
+        description='User Equivalent Range Error (meters) for covariance'
+    )
+
     here4_bridge_node = Node(
         package='here4_dronecan_bridge',
         executable='here4_bridge_node',
@@ -31,11 +37,13 @@ def generate_launch_description():
         parameters=[{
             'can_interface': LaunchConfiguration('can_interface'),
             'node_id': LaunchConfiguration('node_id'),
+            'uere': LaunchConfiguration('uere'),
         }],
     )
 
     return LaunchDescription([
         can_interface_arg,
         node_id_arg,
+        uere_arg,
         here4_bridge_node,
     ])

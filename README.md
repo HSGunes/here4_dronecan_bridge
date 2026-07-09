@@ -81,6 +81,12 @@ sudo src/here4_dronecan_bridge/scripts/setup_waveshare_can.sh /dev/ttyUSB0
 
 ## 🚀 Installation & Usage
 
+### 0. Prerequisites
+You must install the official DroneCAN library on your ROS computer before building or running this node:
+```bash
+pip3 install dronecan
+```
+
 ### 1. Build the Package
 ```bash
 cd ~/your_ws
@@ -90,7 +96,12 @@ source install/setup.bash
 
 ### 2. Run the Node
 ```bash
+# Standard run (UERE = 2.0m for standalone GNSS)
 ros2 launch here4_dronecan_bridge here4_bridge_launch.py
+
+# UX TIP: If you are injecting RTK corrections (e.g. from TUSAGA-Aktif), 
+# you should override the UERE parameter to 2cm (0.02m) so the EKF trusts the GPS perfectly!
+ros2 launch here4_dronecan_bridge here4_bridge_launch.py uere:=0.02
 ```
 
 ---
