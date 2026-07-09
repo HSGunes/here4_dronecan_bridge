@@ -295,24 +295,26 @@ class Here4BridgeNode(Node):
         dt = float(getattr(raw, 'integration_interval', 0.0))
 
         # --- Angular velocity (rad/s) ---
+        # Convert FRD to FLU (Y = -Y, Z = -Z)
         if dt > 0.0 and hasattr(raw, 'rate_gyro_integral') and len(raw.rate_gyro_integral) >= 3:
             msg.angular_velocity.x = float(raw.rate_gyro_integral[0]) / dt
-            msg.angular_velocity.y = float(raw.rate_gyro_integral[1]) / dt
-            msg.angular_velocity.z = float(raw.rate_gyro_integral[2]) / dt
+            msg.angular_velocity.y = -(float(raw.rate_gyro_integral[1]) / dt)
+            msg.angular_velocity.z = -(float(raw.rate_gyro_integral[2]) / dt)
         elif hasattr(raw, 'rate_gyro_latest') and len(raw.rate_gyro_latest) >= 3:
             msg.angular_velocity.x = float(raw.rate_gyro_latest[0])
-            msg.angular_velocity.y = float(raw.rate_gyro_latest[1])
-            msg.angular_velocity.z = float(raw.rate_gyro_latest[2])
+            msg.angular_velocity.y = -float(raw.rate_gyro_latest[1])
+            msg.angular_velocity.z = -float(raw.rate_gyro_latest[2])
 
         # --- Linear acceleration (m/s^2) ---
+        # Convert FRD to FLU (Y = -Y, Z = -Z)
         if dt > 0.0 and hasattr(raw, 'accelerometer_integral') and len(raw.accelerometer_integral) >= 3:
             msg.linear_acceleration.x = float(raw.accelerometer_integral[0]) / dt
-            msg.linear_acceleration.y = float(raw.accelerometer_integral[1]) / dt
-            msg.linear_acceleration.z = float(raw.accelerometer_integral[2]) / dt
+            msg.linear_acceleration.y = -(float(raw.accelerometer_integral[1]) / dt)
+            msg.linear_acceleration.z = -(float(raw.accelerometer_integral[2]) / dt)
         elif hasattr(raw, 'accelerometer_latest') and len(raw.accelerometer_latest) >= 3:
             msg.linear_acceleration.x = float(raw.accelerometer_latest[0])
-            msg.linear_acceleration.y = float(raw.accelerometer_latest[1])
-            msg.linear_acceleration.z = float(raw.accelerometer_latest[2])
+            msg.linear_acceleration.y = -float(raw.accelerometer_latest[1])
+            msg.linear_acceleration.z = -float(raw.accelerometer_latest[2])
 
         # --- Orientation: not available in RawIMU ---
         # Set quaternion to identity and mark covariance as unknown (-1 in first element)
@@ -321,6 +323,19 @@ class Here4BridgeNode(Node):
         msg.orientation.z = 0.0
         msg.orientation.w = 1.0
         msg.orientation_covariance[0] = -1.0  # Signals orientation data is invalid
+
+        # --- Set Covariances ---
+        # Provide base covariances so EKF does not explode (Zero covariance = infinite trust)
+        msg.angular_velocity_covariance = [
+            1e-5, 0.0, 0.0,
+            0.0, 1e-5, 0.0,
+            0.0, 0.0, 1e-5
+        ]
+        msg.linear_acceleration_covariance = [
+            1e-3, 0.0, 0.0,
+            0.0, 1e-3, 0.0,
+            0.0, 0.0, 1e-3
+        ]
 
         self._pub_imu.publish(msg)
 
@@ -332,10 +347,18 @@ class Here4BridgeNode(Node):
         mag = event.message
 
         # Convert from Gauss to Tesla (1 Gauss = 1e-4 Tesla)
+        # Convert FRD to FLU (Y = -Y, Z = -Z)
         if hasattr(mag, 'magnetic_field_ga') and len(mag.magnetic_field_ga) >= 3:
             msg.magnetic_field.x = float(mag.magnetic_field_ga[0]) * 1e-4
-            msg.magnetic_field.y = float(mag.magnetic_field_ga[1]) * 1e-4
-            msg.magnetic_field.z = float(mag.magnetic_field_ga[2]) * 1e-4
+            msg.magnetic_field.y = -(float(mag.magnetic_field_ga[1]) * 1e-4)
+            msg.magnetic_field.z = -(float(mag.magnetic_field_ga[2]) * 1e-4)
+            
+            # Set covariance for magnetometer (Typical values in Tesla^2)
+            msg.magnetic_field_covariance = [
+                1e-7, 0.0, 0.0,
+                0.0, 1e-7, 0.0,
+                0.0, 0.0, 1e-7
+            ]
 
         self._pub_mag.publish(msg)
 
