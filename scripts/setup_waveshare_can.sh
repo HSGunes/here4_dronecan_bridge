@@ -8,21 +8,25 @@ if [ -n "$1" ]; then
     PORT="$1"
 else
     echo "Port belirtilmedi. Otomatik olarak CH340 (Waveshare) cihazı aranıyor..."
-    PORT=""
+    ch340_ports=()
     for dev in /dev/ttyUSB* /dev/ttyACM*; do
-        if [ -e "$dev" ]; then
-            # Check if it's a CH340 (Vendor 1a86)
-            if udevadm info -q property -n "$dev" 2>/dev/null | grep -q "ID_VENDOR_ID=1a86"; then
-                PORT="$dev"
-            fi
+        if [ -e "$dev" ] && udevadm info -q property -n "$dev" 2>/dev/null | grep -q "ID_VENDOR_ID=1a86"; then
+            ch340_ports+=("$dev")
         fi
     done
     
-    if [ -z "$PORT" ]; then
+    if [ ${#ch340_ports[@]} -eq 1 ]; then
+        PORT="${ch340_ports[0]}"
+        echo "-> Otonom Tespit Başarılı: $PORT (CH340 Çipi Doğrulandı)"
+    elif [ ${#ch340_ports[@]} -gt 1 ]; then
+        echo "============================================="
+        echo "DİKKAT: Bilgisayara birden fazla CH340 cihazı bağlı (Örn: Arduino ve Waveshare)"
+        echo "Bulunan portlar: ${ch340_ports[*]}"
+        echo -n "Lütfen Waveshare olan portu yazın (Örn: /dev/ttyUSB2): "
+        read -r PORT
+    else
         PORT="/dev/ttyUSB0"
         echo "UYARI: CH340 donanım kimliği bulunamadı, varsayılan $PORT deneniyor..."
-    else
-        echo "-> Otonom Tespit Başarılı: $PORT (CH340 Çipi Doğrulandı)"
     fi
 fi
 
