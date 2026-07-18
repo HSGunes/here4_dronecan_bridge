@@ -19,11 +19,40 @@ else
         PORT="${ch340_ports[0]}"
         echo "-> Otonom Tespit Başarılı: $PORT (CH340 Çipi Doğrulandı)"
     elif [ ${#ch340_ports[@]} -gt 1 ]; then
+        # Arduino ve Waveshare ikisi de CH340 (1a86:7523) — kimlikçe ayırt
+        # edilemez ve takışta port numarası (ttyUSB0/1) yer değiştirir. O yüzden
+        # İÇERİKTEN ayırt et: hangi port 2M'de 0xAA çerçeveli CAN trafiği yayıyorsa
+        # Waveshare odur (Arduino ASCII telemetri yayar). Port numarası önemsizleşir.
         echo "============================================="
-        echo "DİKKAT: Bilgisayara birden fazla CH340 cihazı bağlı (Örn: Arduino ve Waveshare)"
-        echo "Bulunan portlar: ${ch340_ports[*]}"
-        echo -n "Lütfen Waveshare olan portu yazın (Örn: /dev/ttyUSB2): "
-        read -r PORT
+        echo "Birden fazla CH340 bulundu: ${ch340_ports[*]}"
+        echo "0xAA CAN trafiği yayan Waveshare portu içerikten aranıyor..."
+        PORT="$(python3 - "${ch340_ports[@]}" <<'PYEOF'
+import serial, sys, time
+best_port, best_cnt = "", 0
+for p in sys.argv[1:]:
+    try:
+        s = serial.Serial(p, 2000000, timeout=0.3)
+        buf = bytearray(); t = time.time()
+        while time.time() - t < 0.8:
+            buf.extend(s.read(512))
+        s.close()
+        c = buf.count(0xAA)
+    except Exception:
+        c = 0
+    print(f"   {p}: 0xAA={c}", file=sys.stderr)
+    if c > best_cnt:
+        best_cnt, best_port = c, p
+if best_cnt > 5:
+    print(best_port)
+PYEOF
+)"
+        if [ -n "$PORT" ]; then
+            echo "-> Waveshare otomatik seçildi (0xAA trafiği): $PORT"
+        else
+            echo "Otomatik seçilemedi (0xAA yayan port yok)."
+            echo -n "Lütfen Waveshare olan portu yazın (Örn: /dev/ttyUSB2): "
+            read -r PORT
+        fi
     else
         PORT="/dev/ttyUSB0"
         echo "UYARI: CH340 donanım kimliği bulunamadı, varsayılan $PORT deneniyor..."
