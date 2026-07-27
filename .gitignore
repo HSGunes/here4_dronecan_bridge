@@ -2,3 +2,8 @@ __pycache__/
 *.py[cod]
 .ruff_cache/
 *.egg-info/
+
+# Yanlış dizinde çalıştırılmış colcon'un buraya bıraktığı çıktılar
+build/
+install/
+log/

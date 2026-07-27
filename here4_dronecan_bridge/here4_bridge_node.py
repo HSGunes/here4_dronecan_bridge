@@ -40,6 +40,34 @@ from .ntrip_client import (
 # AttributeError fırlatıyor, bu yüzden parçalamayı biz yapıyoruz.
 RTCM_FRAGMENT_SIZE = 128
 
+# NEO-F9P'nin gezici olarak çözebildiği RTCM 3.3 giriş mesajları
+# (u-blox NEO-F9P Entegrasyon Kılavuzu, "List of supported RTCM input messages").
+# Bu listede OLMAYAN her mesajı alıcı sessizce çöpe atıyor; CAN'e koymanın
+# tek etkisi Waveshare adaptörünün 2 ms/frame TX bütçesini yemek oluyor.
+# 27.07.2026 ölçümü: TUSAGA akışının %10.2'si bu kategoride (%7.2'si tek
+# başına Trimble'a özel 4094).
+F9P_RTCM_INPUT_TYPES = frozenset(
+    {
+        1005,
+        1006,
+        1007,
+        1033,  # referans istasyonu ve anten tanımı
+        1074,
+        1075,
+        1077,  # GPS MSM4/5/7
+        1084,
+        1085,
+        1087,  # GLONASS MSM4/5/7
+        1094,
+        1095,
+        1097,  # Galileo MSM4/5/7
+        1124,
+        1125,
+        1127,  # BeiDou MSM4/5/7
+        1230,  # GLONASS kod-faz bias'ı
+    }
+)
+
 # Suppress noisy dronecan/uavcan library logs to WARNING level
 logging.getLogger("uavcan").setLevel(logging.WARNING)
 logging.getLogger("dronecan").setLevel(logging.WARNING)
@@ -92,7 +120,7 @@ class Here4BridgeNode(Node):
         # --- NTRIP / RTK düzeltmesi ---
         # Zincir: caster -> NtripClient thread -> kuyruk -> spin thread ->
         # uavcan.equipment.gnss.RTCMStream -> AP_Periph handle_RTCMStream()
-        # -> gps.handle_gps_rtcm_fragment() -> ZED-F9P
+        # -> gps.handle_gps_rtcm_fragment() -> NEO-F9P
         self.declare_parameter("ntrip_enabled", False)
         self.declare_parameter("ntrip_host", NTRIP_DEFAULT_HOST)
         self.declare_parameter("ntrip_port", NTRIP_DEFAULT_PORT)
@@ -107,9 +135,19 @@ class Here4BridgeNode(Node):
         # gönderebilmek için: 0.0 = kapalı, gerçek fix gelince otomatik bırakılır.
         self.declare_parameter("ntrip_fallback_lat", 0.0)
         self.declare_parameter("ntrip_fallback_lon", 0.0)
-        # Bir spin turunda gönderilecek azami parça. 100 Hz IMU akışını
-        # aç gözlü RTCM patlamalarına karşı korur (spin turu ~0.1 s).
-        self.declare_parameter("rtcm_max_fragments_per_cycle", 8)
+        # Bir spin turunda gönderilecek azami parça.
+        # DİKKAT — bu sayı bus yükünü değil, Waveshare adaptörünün TX frenini
+        # sınırlar: waveshare_socketcan_bridge.py her CAN frame'inden sonra
+        # 2 ms uyuyor ve o sırada seri porttan RX OKUMUYOR. Bir parça = 19 CAN
+        # frame = 38 ms kesintisiz uyku. 8 parçalık patlama 304 ms RX körlüğü
+        # demek; Here4 o sırada 700 frame/s IMU basıyor ve 4 KB'lık tty
+        # tamponunun ~%78'i doluyor. Ortalama ihtiyaç tur başına ~0.9 parça
+        # (1126 B/s), yani 2 fazlasıyla yeter: 76 ms körlük, tamponun ~%20'si.
+        # Hesabın testi: test_parca_butcesi_tty_tamponunu_tasirmiyor.
+        self.declare_parameter("rtcm_max_fragments_per_cycle", 2)
+        # F9P'nin çözemediği RTCM mesajlarını CAN'e hiç koyma. Farklı bir
+        # alıcı kullanılırsa false yapılabilir.
+        self.declare_parameter("rtcm_filter_unsupported", True)
 
         # Düzeltme kalitesine göre UERE. Sabit uere:=0.02 ile çalışırken RTK
         # kilidi düşerse (4G kopması, köprü altı) kovaryans 2 cm'de kalır ve
@@ -185,6 +223,7 @@ class Here4BridgeNode(Node):
         self._rtcm_sent_fragments = 0
         self._rtcm_dropped_fragments = 0
         self._rtcm_broadcast_errors = 0
+        self._rtcm_filtered_frames = 0
         # GGA için son konum. Tek parça tuple olarak atanır; GIL altında
         # atomik okunur/yazılır, bu yüzden kilide gerek yok.
         self._last_fix_position = None
@@ -363,6 +402,14 @@ class Here4BridgeNode(Node):
         dronecan node'u thread-safe değil; bu dosyadaki tüm DroneCAN nesneleri
         bilerek spin thread'inde yaratılıyor (bkz. _dronecan_thread_main).
         """
+        # Alıcının çözemeyeceği mesajı CAN'e koymanın tek etkisi adaptörün
+        # TX bütçesini yemek olur (bkz. F9P_RTCM_INPUT_TYPES).
+        if len(frame) >= 5 and self.get_parameter("rtcm_filter_unsupported").value:
+            msg_type = (frame[3] << 4) | (frame[4] >> 4)
+            if msg_type not in F9P_RTCM_INPUT_TYPES:
+                self._rtcm_filtered_frames += 1
+                return
+
         for offset in range(0, len(frame), RTCM_FRAGMENT_SIZE):
             fragment = frame[offset : offset + RTCM_FRAGMENT_SIZE]
             try:
@@ -409,6 +456,7 @@ class Here4BridgeNode(Node):
             f"RTCM: bağlı={client.connected} "
             f"cerceve={client.total_frames} bayt={client.total_bytes} "
             f"gonderilen={self._rtcm_sent_fragments} "
+            f"filtrelenen={self._rtcm_filtered_frames} "
             f"dusen={self._rtcm_dropped_fragments} "
             f"yayin_hatasi={self._rtcm_broadcast_errors} "
             f"crc_hata={client.crc_errors} yeniden_baglanma={client.reconnects} "

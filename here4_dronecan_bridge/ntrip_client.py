@@ -20,7 +20,7 @@ _CRC24Q_POLY = 0x1864CFB
 # TUSAGA-Aktif (TKGM) varsayılanları. Kaynak: caster sourcetable + TKGM SSS.
 DEFAULT_HOST = "212.156.70.42"
 DEFAULT_PORT = 2101
-# VRSRTCM34: GPS+GLO+GAL+BDS+QZS, RTCM 3.4 — ZED-F9P'nin çok-takımyıldız
+# VRSRTCM34: GPS+GLO+GAL+BDS+QZS, RTCM 3.4 — NEO-F9P'nin çok-takımyıldız
 # yeteneğini kullanan tek yayın. Yedek: VRSRTCM31 (sadece GPS+GLONASS).
 DEFAULT_MOUNTPOINT = "VRSRTCM34"
 

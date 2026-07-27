@@ -108,7 +108,7 @@ ros2 launch here4_dronecan_bridge here4_bridge_launch.py ntrip_enabled:=true
 
 ## 📶 RTK via NTRIP (TUSAGA-Aktif)
 
-The Here 4 has no USB port, so corrections reach its ZED-F9P over the CAN bus:
+The Here 4 has no USB port, so corrections reach its NEO-F9P over the CAN bus:
 
 ```
 NTRIP caster ──TCP──> NtripClient thread ──queue──> spin thread
@@ -118,7 +118,7 @@ NTRIP caster ──TCP──> NtripClient thread ──queue──> spin thread
                                                         │
                     AP_Periph handle_RTCMStream() ──> gps.handle_gps_rtcm_fragment()
                                                         │
-                                                        ▼  ZED-F9P
+                                                        ▼  NEO-F9P
                             Fix2.mode=RTK, sub_mode=FIXED ──> /here4/gps/fix
 ```
 
@@ -191,7 +191,38 @@ and the current fix quality.
 | `ntrip_user` / `ntrip_password` | `""` | Falls back to `TUSAGA_USER` / `TUSAGA_PASS`. |
 | `ntrip_gga_period` | `5.0` | Seconds between GGA uplinks. |
 | `ntrip_fallback_lat` / `_lon` | `0.0` | GGA position to use before the first fix (`0` = disabled). Useful for indoor testing; a real fix always wins. |
-| `rtcm_max_fragments_per_cycle` | `8` | Caps RTCM bursts per spin cycle so they cannot starve the 100 Hz IMU stream on the CAN bus. |
+| `rtcm_max_fragments_per_cycle` | `2` | Caps RTCM bursts per spin cycle. See the CAN budget note below — this protects the USB adapter, not the bus. |
+| `rtcm_filter_unsupported` | `true` | Drop RTCM messages the F9P cannot decode instead of putting them on the bus. Set `false` for a different receiver. |
+
+### CAN budget: the bus is fine, the USB adapter is not
+
+Measured, with message sizes encoded through the DroneCAN library:
+
+| Message | CAN frames | Rate | frames/s | kbit/s |
+|---|---|---|---|---|
+| `RawIMU` | 7 | 100 Hz | 700 | 105.0 |
+| `Fix2` | 8 | ~10 Hz | 80 | 12.0 |
+| `MagneticFieldStrength` | 1 | ~50 Hz | 50 | 7.5 |
+| `Auxiliary` | 3 | 1 Hz | 3 | 0.5 |
+| **`RTCMStream` (128 B)** | **19** | **8.8 Hz** | **167** | **25.1** |
+| | | | **~1000** | **150** |
+
+That is **15 % of a 1 Mbit/s bus** — no problem there. The constraint is
+[`waveshare_socketcan_bridge.py`](scripts/waveshare_socketcan_bridge.py), which sleeps
+2 ms after **every** frame it writes (the comment says "multi-frame TX", the code does
+it per frame). That caps PC→sensor at **500 frames/s**, and because the bridge is a
+single-threaded `select()` loop, it is **not reading the serial port while it sleeps**.
+
+One RTCM fragment = 19 frames = 38 ms of RX blackout. With the old default of 8
+fragments per cycle a burst meant 304 ms blind, during which the Here 4 pushes ~213 IMU
+frames — about 78 % of a 4 KB tty buffer. At 2 fragments it is 76 ms and ~20 %.
+`test_parca_butcesi_tty_tamponunu_tasirmiyor` pins this arithmetic.
+
+Filtering unsupported messages removes a further 10.2 % of the stream (measured:
+`4094` Trimble-proprietary alone is 7.2 %), taking 170 → 153 frames/s.
+
+If RTK proves marginal in the field, the real fix is a native SocketCAN adapter
+(CANable / gs_usb): the 2 ms throttle disappears entirely.
 
 **Why UERE is no longer a single fixed number:** with a hardcoded `uere:=0.02`, losing
 RTK lock (LTE dropout, overpass) leaves the covariance at 2 cm while the position

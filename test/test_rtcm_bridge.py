@@ -196,3 +196,79 @@ def test_fallback_konum_davranisi(node):
 
     node._last_fix_position = (1.0, 2.0, 3.0)
     assert node._get_gga_position() == (1.0, 2.0, 3.0), "gerçek fix fallback'i ezer"
+
+
+# --- Waveshare TX bütçesi koruması ---------------------------------------- #
+# waveshare_socketcan_bridge.py her CAN frame'inden sonra 2 ms uyuyor ve o
+# sırada seri porttan RX okumuyor. Bir RTCM parçası = 19 CAN frame = 38 ms.
+# Aşağıdaki iki koruma o körlük penceresini sınırlıyor.
+
+
+def test_parca_butcesi_tty_tamponunu_tasirmiyor(node):
+    """Asıl kısıt: körlük süresince biriken IMU verisi tty tamponuna sığmalı.
+
+    Zincir: bir parça = 19 CAN frame; her frame'den sonra köprü 2 ms uyuyor ve
+    o sırada seri porttan okumuyor. Here4 bu boyunca 100 Hz IMU (7 frame) =
+    700 frame/s basmaya devam ediyor. Okunmayan her frame Waveshare paketi
+    olarak (0xAA + tip + 4 ID + <=8 veri + 0x55 = 15 bayt) tty tamponunda
+    birikiyor. Taşarsa IMU frame'leri düşer, DroneCAN transferi bozulur ve
+    spin döngüsündeki genel `except` bunu sessizce yutar.
+    """
+    budget = node.get_parameter("rtcm_max_fragments_per_cycle").value
+    CAN_FRAMES_PER_FRAGMENT = 19  # ölçüldü: 128 B RTCMStream -> 19 CAN frame
+    WAVESHARE_SLEEP_S = 0.002  # waveshare_socketcan_bridge.py:218
+    IMU_FRAMES_PER_S = 700  # 100 Hz RawIMU x 7 CAN frame
+    WAVESHARE_PACKET_BYTES = 15
+    TTY_BUFFER_BYTES = 4096  # tipik Linux seri port tamponu
+
+    blackout_s = budget * CAN_FRAMES_PER_FRAGMENT * WAVESHARE_SLEEP_S
+    buffered = blackout_s * IMU_FRAMES_PER_S * WAVESHARE_PACKET_BYTES
+    doluluk = buffered / TTY_BUFFER_BYTES
+
+    assert doluluk <= 0.50, (
+        f"bütçe={budget} -> {blackout_s * 1000:.0f} ms RX körlüğü -> "
+        f"{buffered:.0f} B birikir = tty tamponunun %{doluluk * 100:.0f}'i. "
+        "Güvenlik payı için %50'nin altında kalmalı."
+    )
+
+
+@pytest.mark.parametrize(
+    "msg_type,gonderilmeli",
+    [
+        (1075, True),  # GPS MSM5 — asıl iş
+        (1085, True),  # GLONASS MSM5
+        (1095, True),  # Galileo MSM5
+        (1125, True),  # BeiDou MSM5
+        (1005, True),  # referans istasyonu
+        (1230, True),  # GLONASS kod-faz bias
+        (4094, False),  # Trimble özel — akışın %7.2'si
+        (1030, False),  # ağ artığı
+        (1031, False),
+        (1032, False),
+        (1303, False),
+        (1304, False),
+    ],
+)
+def test_f9p_cozemedigi_mesajlar_cana_konmuyor(node, msg_type, gonderilmeli):
+    node._on_rtcm_frame(make_rtcm_frame(msg_type, 60))
+    fragments = kuyrugu_bosalt(node)
+
+    if gonderilmeli:
+        assert fragments, f"{msg_type} F9P giriş listesinde, gönderilmeliydi"
+    else:
+        assert not fragments, f"{msg_type} F9P tarafından atılıyor, CAN'e konmamalı"
+        assert node._rtcm_filtered_frames > 0
+
+
+def test_filtre_kapatilabiliyor(node):
+    """Farklı bir alıcı kullanılırsa filtre devre dışı bırakılabilmeli."""
+    node.set_parameters(
+        [rclpy.parameter.Parameter("rtcm_filter_unsupported", value=False)]
+    )
+    try:
+        node._on_rtcm_frame(make_rtcm_frame(4094, 60))
+        assert kuyrugu_bosalt(node), "filtre kapalıyken her mesaj geçmeli"
+    finally:
+        node.set_parameters(
+            [rclpy.parameter.Parameter("rtcm_filter_unsupported", value=True)]
+        )
