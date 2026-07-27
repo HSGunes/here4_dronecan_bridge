@@ -42,6 +42,33 @@ def generate_launch_description():
         description="Lokalizasyon zincirinin beklediği topic isimlerine remap et",
     )
 
+    # --- NTRIP / RTK ---
+    # Kimlik bilgisi BİLEREK launch argümanı değil: bu paket herkese açık bir
+    # git deposu. TUSAGA_USER / TUSAGA_PASS ortam değişkenlerinden okunur.
+    ntrip_enabled_arg = DeclareLaunchArgument(
+        "ntrip_enabled",
+        default_value="false",
+        description="TUSAGA-Aktif RTK düzeltmesini aç (TUSAGA_USER/TUSAGA_PASS gerekir)",
+    )
+
+    ntrip_mountpoint_arg = DeclareLaunchArgument(
+        "ntrip_mountpoint",
+        default_value="VRSRTCM34",
+        description="NTRIP mountpoint (VRSRTCM34 = GPS+GLO+GAL+BDS+QZS; yedek VRSRTCM31)",
+    )
+
+    ntrip_fallback_lat_arg = DeclareLaunchArgument(
+        "ntrip_fallback_lat",
+        default_value="0.0",
+        description="GPS fix'i yokken GGA için kullanılacak enlem (0 = kapalı)",
+    )
+
+    ntrip_fallback_lon_arg = DeclareLaunchArgument(
+        "ntrip_fallback_lon",
+        default_value="0.0",
+        description="GPS fix'i yokken GGA için kullanılacak boylam (0 = kapalı)",
+    )
+
     def setup_node(context):
         from launch_ros.actions import Node
 
@@ -69,6 +96,10 @@ def generate_launch_description():
                         "can_interface": LaunchConfiguration("can_interface"),
                         "node_id": LaunchConfiguration("node_id"),
                         "uere": LaunchConfiguration("uere"),
+                        "ntrip_enabled": LaunchConfiguration("ntrip_enabled"),
+                        "ntrip_mountpoint": LaunchConfiguration("ntrip_mountpoint"),
+                        "ntrip_fallback_lat": LaunchConfiguration("ntrip_fallback_lat"),
+                        "ntrip_fallback_lon": LaunchConfiguration("ntrip_fallback_lon"),
                     }
                 ],
                 remappings=remappings,
@@ -81,6 +112,10 @@ def generate_launch_description():
             node_id_arg,
             uere_arg,
             use_standard_topics_arg,
+            ntrip_enabled_arg,
+            ntrip_mountpoint_arg,
+            ntrip_fallback_lat_arg,
+            ntrip_fallback_lon_arg,
             OpaqueFunction(function=setup_node),
         ]
     )

@@ -99,10 +99,79 @@ source install/setup.bash
 # Standard run (UERE = 2.0m for standalone GNSS)
 ros2 launch here4_dronecan_bridge here4_bridge_launch.py
 
-# UX TIP: If you are injecting RTK corrections (e.g. from TUSAGA-Aktif), 
-# you should override the UERE parameter to 2cm (0.02m) so the EKF trusts the GPS perfectly!
-ros2 launch here4_dronecan_bridge here4_bridge_launch.py uere:=0.02
+# With TUSAGA-Aktif RTK corrections (see the RTK section below)
+export TUSAGA_USER='...' TUSAGA_PASS='...'
+ros2 launch here4_dronecan_bridge here4_bridge_launch.py ntrip_enabled:=true
 ```
+
+---
+
+## 📶 RTK via NTRIP (TUSAGA-Aktif)
+
+The Here 4 has no USB port, so corrections reach its ZED-F9P over the CAN bus:
+
+```
+NTRIP caster ──TCP──> NtripClient thread ──queue──> spin thread
+   ↑ NMEA GGA uplink                                    │
+                                                        ▼
+                        uavcan.equipment.gnss.RTCMStream (1062, ≤128 B/msg)
+                                                        │
+                    AP_Periph handle_RTCMStream() ──> gps.handle_gps_rtcm_fragment()
+                                                        │
+                                                        ▼  ZED-F9P
+                            Fix2.mode=RTK, sub_mode=FIXED ──> /here4/gps/fix
+```
+
+**TUSAGA-Aktif connection details** (verified against the live caster source table):
+
+| | |
+|---|---|
+| Caster | `212.156.70.42:2101` |
+| Mountpoint | `VRSRTCM34` — RTCM 3.4, GPS+GLO+GAL+BDS+QZS (fallback: `VRSRTCM31`, GPS+GLONASS only) |
+| Auth | HTTP Basic — credentials come with your TKGM subscription |
+| NMEA GGA | **Required.** Every stream advertises `nmea=1`; the VRS is generated at the position you report. No GGA, no corrections. |
+
+Credentials are read from `TUSAGA_USER` / `TUSAGA_PASS` **environment variables** by
+default — do not put a password in a launch file, this repo is public. The
+`ntrip_user` / `ntrip_password` parameters override them if you must.
+
+### Two gotchas that cost us a field session
+
+**The NTRIP username is not your portal login.** `tusaga-aktif.gov.tr` signs you in
+with your *e-mail address*; the caster wants the *per-receiver* username/password
+listed under **"Tanımlı Alıcılar"** in that portal (ours looks like `K040100701`).
+Using the portal e-mail gets a clean `401 Unauthorized`.
+
+**The caster streams `Transfer-Encoding: chunked`** (`Server: Trimble Ntrip Caster
+5.2`). A client that ignores this splices ASCII chunk-length headers (`1F\r\n`,
+`400\r\n`, …) straight into the RTCM byte stream — and because chunk boundaries fall
+at arbitrary offsets, they land *inside* RTCM frames. Measured on a real 23 251-byte
+capture: **4.12 % of bytes outside any frame, ~5 % of frames destroyed.** `ChunkedDecoder`
+handles this; after the fix the same 30 s window decodes 211 frames with **0 CRC errors**
+(was 203 frames / 10 CRC errors).
+
+### Verify your subscription before touching CAN
+
+```bash
+export TUSAGA_USER='...' TUSAGA_PASS='...'
+ros2 run here4_dronecan_bridge ntrip_test --lat 37.05 --lon 35.32
+# or, once the Here 4 already has a standalone fix:
+ros2 run here4_dronecan_bridge ntrip_test --ros-fix
+```
+
+The script only reads — it needs neither CAN nor the Here 4. It reports byte rate
+and decoded RTCM message types. `--sourcetable` dumps the caster's stream list
+without sending any credentials.
+
+### Checking that it worked
+
+```bash
+ros2 topic echo /here4/gps/fix --field status.status   # 2 = STATUS_GBAS_FIX = RTK
+candump can0 | grep -c 1062                            # RTCMStream frames on the bus
+```
+
+The node logs a `RTCM: ...` line every 10 s with frame counts, dropped fragments
+and the current fix quality.
 
 ---
 
@@ -112,7 +181,22 @@ ros2 launch here4_dronecan_bridge here4_bridge_launch.py uere:=0.02
 |-----------|---------|-------------|
 | `can_interface` | `can0` | The SocketCAN interface your adapter is bound to. |
 | `node_id` | `10` | The DroneCAN Node ID for your ROS computer. |
-| `uere` | `2.0` | User Equivalent Range Error (meters) for standalone ZED-F9P. Used to dynamically calculate the GNSS covariance matrix. *(Set to `0.02` if using RTK)*. |
+| `uere` | `2.0` | User Equivalent Range Error (meters) for a standalone (SINGLE) solution. Used to dynamically calculate the GNSS covariance matrix. |
+| `uere_rtk_fixed` | `0.02` | UERE when `Fix2.mode=RTK, sub_mode=FIXED`. |
+| `uere_rtk_float` | `0.30` | UERE when `Fix2.mode=RTK, sub_mode=FLOAT`. |
+| `uere_dgps` | `1.00` | UERE when `Fix2.mode=DGPS`. |
+| `ntrip_enabled` | `false` | Enable the NTRIP client. |
+| `ntrip_host` / `ntrip_port` | `212.156.70.42` / `2101` | Caster address. |
+| `ntrip_mountpoint` | `VRSRTCM34` | Correction stream. |
+| `ntrip_user` / `ntrip_password` | `""` | Falls back to `TUSAGA_USER` / `TUSAGA_PASS`. |
+| `ntrip_gga_period` | `5.0` | Seconds between GGA uplinks. |
+| `ntrip_fallback_lat` / `_lon` | `0.0` | GGA position to use before the first fix (`0` = disabled). Useful for indoor testing; a real fix always wins. |
+| `rtcm_max_fragments_per_cycle` | `8` | Caps RTCM bursts per spin cycle so they cannot starve the 100 Hz IMU stream on the CAN bus. |
+
+**Why UERE is no longer a single fixed number:** with a hardcoded `uere:=0.02`, losing
+RTK lock (LTE dropout, overpass) leaves the covariance at 2 cm while the position
+error grows to metres — the EKF would keep trusting it blindly. The value now
+follows `Fix2.mode`/`sub_mode`.
 
 ## 📡 Published Topics
 - `/here4/gps/fix` (`sensor_msgs/msg/NavSatFix`) - GNSS Data with dynamic Covariance
