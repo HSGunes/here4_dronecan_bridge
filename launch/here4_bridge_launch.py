@@ -69,6 +69,21 @@ def generate_launch_description():
         description="GPS fix'i yokken GGA için kullanılacak boylam (0 = kapalı)",
     )
 
+    rtcm_max_fragments_arg = DeclareLaunchArgument(
+        "rtcm_max_fragments_per_cycle",
+        default_value="4",
+        description="Spin döngüsü başına CAN'e verilecek RTCM parça sayısı. "
+        "Saha ölçümü: 2 -> 4 ile RTK FIXED süresi ~360 s'den ~100 s'ye indi "
+        "(1 ms TX beklemesiyle ~60 s). 4'ün üstü test edilmedi.",
+    )
+
+    rtcm_filter_arg = DeclareLaunchArgument(
+        "rtcm_filter_unsupported",
+        default_value="true",
+        description="F9P'nin çözemediği RTCM mesajlarını CAN'e hiç koyma. "
+        "Farklı bir alıcı kullanılırsa false yapılabilir.",
+    )
+
     def setup_node(context):
         from launch_ros.actions import Node
 
@@ -100,6 +115,12 @@ def generate_launch_description():
                         "ntrip_mountpoint": LaunchConfiguration("ntrip_mountpoint"),
                         "ntrip_fallback_lat": LaunchConfiguration("ntrip_fallback_lat"),
                         "ntrip_fallback_lon": LaunchConfiguration("ntrip_fallback_lon"),
+                        "rtcm_max_fragments_per_cycle": LaunchConfiguration(
+                            "rtcm_max_fragments_per_cycle"
+                        ),
+                        "rtcm_filter_unsupported": LaunchConfiguration(
+                            "rtcm_filter_unsupported"
+                        ),
                     }
                 ],
                 remappings=remappings,
@@ -116,6 +137,8 @@ def generate_launch_description():
             ntrip_mountpoint_arg,
             ntrip_fallback_lat_arg,
             ntrip_fallback_lon_arg,
+            rtcm_max_fragments_arg,
+            rtcm_filter_arg,
             OpaqueFunction(function=setup_node),
         ]
     )

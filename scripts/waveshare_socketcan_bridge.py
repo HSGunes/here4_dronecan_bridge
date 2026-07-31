@@ -4,6 +4,7 @@ import socket
 import struct
 import sys
 import select
+import threading
 import time
 
 
@@ -68,6 +69,18 @@ def main():
     # Opsiyonel 3. arg: CAN bitrate kodu (hex). Default 0x01 = 1 Mbps (bu robot).
     # Farklı bus için: 0x03=500k, 0x05=250k, 0x07=125k ...
     can_baud = int(sys.argv[3], 0) if len(sys.argv) >= 4 else 0x01
+    # Opsiyonel 4. arg: TX frame'leri arası bekleme (ms). Adaptörün TX tamponu
+    # taşmasın diye konmuştu; ama RTCM düzeltmelerinin gecikmesini bu belirliyor:
+    # 1 RTCM parçası = 20 CAN frame, yani parça başına 20*tx_sleep ms.
+    # 28.07.2026 saha ölçümü (budget=4 sabit, RTK FIXED'e geçiş süresi):
+    #   2.0 ms -> ~100 s   1.0 ms -> ~60 s
+    # Her ikisinde de CAN seviyesinde (candump) IMU akışı temiz: 0 boşluk,
+    # max aralık ~20 ms. DİKKAT: IMU boşluğunu Python ile ölçmeyin — CPU yüklü
+    # sistemde ölçüm node'unun kendi gecikmesi sahte boşluk raporlar; bu tuzak
+    # 1.0 ms'i bir kez haksız yere eledi. Doğru katman: candump.
+    # 0.5 ms de denendi, ek kazanç görülmedi. Çok düşürmek adaptörde frame
+    # kaybı yapabilir (crc_hata / dusen sayaçlarından izlenir).
+    tx_sleep = (float(sys.argv[4]) / 1000.0) if len(sys.argv) >= 5 else 0.001
 
     # Setup SocketCAN
     try:
@@ -108,10 +121,67 @@ def main():
 
     buffer = bytearray()
 
+    # TX (SocketCAN -> seri) AYRI THREAD'DE.
+    # Tek thread'de yapılınca her frame'deki 2 ms'lik anti-taşma beklemesi
+    # seri okumayı da durduruyordu: RTCM gibi çok-frame'li bir transfer
+    # gönderilirken CH340 giriş tamponu taşıp Here4'ten gelen 100 Hz IMU
+    # frame'leri düşüyordu (ölçüm: 686 ms'lik IMU boşluğu, tam RTCM anına
+    # denk geliyor). Aynı tıkanma RTCM'i de geciktirip RTK FIXED'i yavaşlatıyordu.
+    tx_stop = threading.Event()
+    ser_write_lock = threading.Lock()
+
+    def tx_worker():
+        while not tx_stop.is_set():
+            try:
+                r, _, _ = select.select([can_sock], [], [], 0.05)
+                if not r:
+                    continue
+                frame, _ = can_sock.recvfrom(16)
+                if not frame:
+                    continue
+                can_id, dlc, padded_data = struct.unpack(CAN_FRAME_FMT, frame)
+                data_bytes = padded_data[:dlc]
+
+                is_extended = bool(can_id & CAN_EFF_FLAG)
+                is_remote = bool(can_id & CAN_RTR_FLAG)
+
+                type_byte = 0xC0
+                if is_extended:
+                    type_byte |= 0x20
+                if is_remote:
+                    type_byte |= 0x10
+                type_byte |= dlc & 0x0F
+
+                if is_extended:
+                    id_bytes = (can_id & 0x1FFFFFFF).to_bytes(4, byteorder="little")
+                else:
+                    id_bytes = (can_id & 0x7FF).to_bytes(2, byteorder="little")
+
+                serial_packet = bytearray([0xAA, type_byte])
+                serial_packet.extend(id_bytes)
+                serial_packet.extend(data_bytes)
+                serial_packet.append(0x55)
+
+                with ser_write_lock:
+                    ser.write(serial_packet)
+                # Adaptörün TX tamponunu taşırmamak için gerekli; artık yalnız
+                # bu thread'i bekletiyor, seri okuma etkilenmiyor.
+                if tx_sleep > 0:
+                    time.sleep(tx_sleep)
+            except BlockingIOError:
+                pass
+            except Exception as e:
+                if not tx_stop.is_set():
+                    print(f"TX thread error: {e}", file=sys.stderr)
+                break
+
+    tx_thread = threading.Thread(target=tx_worker, daemon=True)
+    tx_thread.start()
+
     try:
         while True:
-            # Use select to wait for data on serial or socket (with a short timeout)
-            r, _, _ = select.select([ser, can_sock], [], [], 0.05)
+            # RX: yalnızca seri portu bekle — TX artık ayrı thread'de.
+            r, _, _ = select.select([ser], [], [], 0.05)
 
             # 1. From Serial to SocketCAN
             if ser in r:
@@ -179,53 +249,11 @@ def main():
                     # Consume packet
                     del buffer[:packet_len]
 
-            # 2. From SocketCAN to Serial
-            if can_sock in r:
-                try:
-                    frame, _ = can_sock.recvfrom(16)
-                    if frame:
-                        can_id, dlc, padded_data = struct.unpack(CAN_FRAME_FMT, frame)
-                        data_bytes = padded_data[:dlc]
-
-                        is_extended = bool(can_id & CAN_EFF_FLAG)
-                        is_remote = bool(can_id & CAN_RTR_FLAG)
-
-                        # Construct Type byte
-                        type_byte = 0xC0
-                        if is_extended:
-                            type_byte |= 0x20
-                        if is_remote:
-                            type_byte |= 0x10
-                        type_byte |= dlc & 0x0F
-
-                        # Pack ID
-                        if is_extended:
-                            raw_id = can_id & 0x1FFFFFFF
-                            id_bytes = raw_id.to_bytes(4, byteorder="little")
-                        else:
-                            raw_id = can_id & 0x7FF
-                            id_bytes = raw_id.to_bytes(2, byteorder="little")
-
-                        # Construct serial packet
-                        serial_packet = bytearray([0xAA, type_byte])
-                        serial_packet.extend(id_bytes)
-                        serial_packet.extend(data_bytes)
-                        serial_packet.append(0x55)
-
-                        ser.write(serial_packet)
-                        import time
-
-                        time.sleep(
-                            0.002
-                        )  # 2ms delay to prevent buffer overflow on multi-frame TX
-                except BlockingIOError:
-                    pass
-                except Exception as e:
-                    print(f"SocketCAN read/write error: {e}", file=sys.stderr)
-                    break
     except KeyboardInterrupt:
         print("\nStopping bridge...")
     finally:
+        tx_stop.set()
+        tx_thread.join(timeout=1.0)
         ser.close()
         can_sock.close()
 

@@ -136,15 +136,16 @@ class Here4BridgeNode(Node):
         self.declare_parameter("ntrip_fallback_lat", 0.0)
         self.declare_parameter("ntrip_fallback_lon", 0.0)
         # Bir spin turunda gönderilecek azami parça.
-        # DİKKAT — bu sayı bus yükünü değil, Waveshare adaptörünün TX frenini
-        # sınırlar: waveshare_socketcan_bridge.py her CAN frame'inden sonra
-        # 2 ms uyuyor ve o sırada seri porttan RX OKUMUYOR. Bir parça = 19 CAN
-        # frame = 38 ms kesintisiz uyku. 8 parçalık patlama 304 ms RX körlüğü
-        # demek; Here4 o sırada 700 frame/s IMU basıyor ve 4 KB'lık tty
-        # tamponunun ~%78'i doluyor. Ortalama ihtiyaç tur başına ~0.9 parça
-        # (1126 B/s), yani 2 fazlasıyla yeter: 76 ms körlük, tamponun ~%20'si.
-        # Hesabın testi: test_parca_butcesi_tty_tamponunu_tasirmiyor.
-        self.declare_parameter("rtcm_max_fragments_per_cycle", 2)
+        # 28.07.2026: köprüde TX artık AYRI THREAD'de (waveshare bridge), yani
+        # 2 ms'lik frame arası bekleme seri OKUMAYI ARTIK DURDURMUYOR — eski
+        # "RX körlüğü" gerekçesi geçersiz (ölçüm: IMU boşluğu 686 ms -> 20 ms).
+        # Kalan kısıt gecikme: parça kuyrukta beklerse düzeltme bayatlar ve RTK
+        # FIXED'e geçiş uzar. 2 -> 4 ölçümle seçildi:
+        #   budget=2: kapasite ~10 parça/s, ihtiyaç 9.3 -> marj %7, yaş 0.71 s,
+        #             FIXED ~6 dk
+        #   budget=4: marj %115, yaş 0.57 s, FIXED ~1.40 dk
+        # Üst sınırı test_parca_butcesi_tty_tamponunu_tasirmiyor koruyor.
+        self.declare_parameter("rtcm_max_fragments_per_cycle", 4)
         # F9P'nin çözemediği RTCM mesajlarını CAN'e hiç koyma. Farklı bir
         # alıcı kullanılırsa false yapılabilir.
         self.declare_parameter("rtcm_filter_unsupported", True)
@@ -491,17 +492,23 @@ class Here4BridgeNode(Node):
         light.light_id = 255
 
         color = dronecan.uavcan.equipment.indication.RGB565()
-        # Status >= 3 means 3D Fix or better
-        if self._last_gps_fix_status >= 3:
-            # Solid Green (Max 63)
-            color.red = 0
-            color.green = 63
-            color.blue = 0
+        # LED = düzeltme kalitesi göstergesi. Sahada araç dışarıdayken laptop
+        # başında olunmuyor; RTK FIXED'e geçişi anteni görerek anlamak gerekiyor.
+        # Sadece 3D fix'e bakmak yetmiyordu: mod SINGLE->DGPS->RTK ilerlerken
+        # status hep 3 kaldığı için LED hiç değişmiyordu.
+        # RGB565: red/blue 5 bit (0-31), green 6 bit (0-63).
+        if self._last_gps_fix_status < 3:
+            rgb = (0, 0, 31)  # mavi   — fix yok
+        elif self._last_fix_mode == 2 and self._last_fix_sub_mode == 1:
+            rgb = (0, 63, 0)  # yeşil  — RTK FIXED (cm)
+        elif self._last_fix_mode == 2:
+            rgb = (31, 0, 31)  # mor    — RTK FLOAT (dm)
+        elif self._last_fix_mode in (1, 3):
+            rgb = (0, 63, 31)  # turkuaz— DGPS / PPP (m)
         else:
-            # Solid Blue (Max 31)
-            color.red = 0
-            color.green = 0
-            color.blue = 31
+            rgb = (31, 63, 0)  # sarı   — 3D fix ama düzeltme yok (SINGLE)
+
+        color.red, color.green, color.blue = rgb
 
         light.color = color
         cmd.commands.append(light)

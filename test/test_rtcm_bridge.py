@@ -199,9 +199,11 @@ def test_fallback_konum_davranisi(node):
 
 
 # --- Waveshare TX bütçesi koruması ---------------------------------------- #
-# waveshare_socketcan_bridge.py her CAN frame'inden sonra 2 ms uyuyor ve o
-# sırada seri porttan RX okumuyor. Bir RTCM parçası = 19 CAN frame = 38 ms.
-# Aşağıdaki iki koruma o körlük penceresini sınırlıyor.
+# 28.07.2026: köprüde TX ayrı thread'e alındı, yani frame arası bekleme artık
+# seri OKUMAYI durdurmuyor — eski "RX körlüğü" gerekçesi geçersiz (CAN seviyesi
+# ölçüm: IMU boşluğu 686 ms -> 20 ms, budget=4 + 1 ms ile 0 boşluk).
+# Aşağıdaki koruma yine de bütçenin sınırsız büyümesine karşı üst sınır bırakır:
+# en kötü durum (TX'in RX'i bloke ettiği eski mimari) varsayımıyla hesaplar.
 
 
 def test_parca_butcesi_tty_tamponunu_tasirmiyor(node):
@@ -216,7 +218,7 @@ def test_parca_butcesi_tty_tamponunu_tasirmiyor(node):
     """
     budget = node.get_parameter("rtcm_max_fragments_per_cycle").value
     CAN_FRAMES_PER_FRAGMENT = 19  # ölçüldü: 128 B RTCMStream -> 19 CAN frame
-    WAVESHARE_SLEEP_S = 0.002  # waveshare_socketcan_bridge.py:218
+    WAVESHARE_SLEEP_S = 0.001  # waveshare_socketcan_bridge.py tx_sleep default
     IMU_FRAMES_PER_S = 700  # 100 Hz RawIMU x 7 CAN frame
     WAVESHARE_PACKET_BYTES = 15
     TTY_BUFFER_BYTES = 4096  # tipik Linux seri port tamponu
