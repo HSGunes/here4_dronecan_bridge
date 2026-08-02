@@ -56,6 +56,29 @@ If you need high-precision altitude data (Z-axis):
 2. **Fix:** Change it from `0` to `1`.
 3. Click **Store All** and reboot.
 
+### Step 4: Set the Dynamic Platform Model (matters for RTK)
+Here 4 ships with `GPS_NAVFILTER = 8` (**Airborne4G**) — an ArduPilot default aimed
+at drones. On a ground vehicle the receiver then assumes it may be flung around at
+4 g, so it cannot rely on position continuity between epochs. RTK ambiguity
+resolution depends on exactly that continuity, so the wrong model can slow the
+FLOAT → FIXED transition or make the lock fragile.
+
+1. Search for `GPS_NAVFILTER`.
+2. **Fix:** set it to `4` (**Automotive**) for a car/UGV.
+3. Click **Store All** and reboot.
+
+Values (ArduPilot parameter reference): `0` Portable, `2` Stationary,
+`3` Pedestrian, `4` Automotive, `5` Sea, `6/7/8` Airborne 1g/2g/4g.
+
+> **Bench testing with the vehicle parked?** `2` (Stationary) converges fastest.
+> Switch back to `4` before driving — in Stationary the solution degrades once
+> the vehicle moves.
+
+*Honest note:* we changed this from 8 → 4 during field work but could not prove
+the improvement. Time-to-FIXED varied between 30 s and 107 s under otherwise
+identical conditions (same satellite count, same correction age), so a single
+run tells you nothing here — average several runs before concluding anything.
+
 ---
 
 ## 🩹 The "Waveshare USB-CAN" Buffer Overflow Hack
