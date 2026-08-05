@@ -69,6 +69,14 @@ def generate_launch_description():
         description="GPS fix'i yokken GGA için kullanılacak boylam (0 = kapalı)",
     )
 
+    ntrip_gga_period_arg = DeclareLaunchArgument(
+        "ntrip_gga_period",
+        default_value="5.0",
+        description="Caster'a NMEA GGA gönderme aralığı (saniye). VRS sanal bazı "
+        "bu konuma üretilir. VRS istemcilerinde alışılmış aralık 10-60 s; 5 s'lik "
+        "varsayılanın caster duraklarına yol açıp açmadığı henüz ölçülmedi.",
+    )
+
     rtcm_max_fragments_arg = DeclareLaunchArgument(
         "rtcm_max_fragments_per_cycle",
         default_value="4",
@@ -113,6 +121,7 @@ def generate_launch_description():
                         "uere": LaunchConfiguration("uere"),
                         "ntrip_enabled": LaunchConfiguration("ntrip_enabled"),
                         "ntrip_mountpoint": LaunchConfiguration("ntrip_mountpoint"),
+                        "ntrip_gga_period": LaunchConfiguration("ntrip_gga_period"),
                         "ntrip_fallback_lat": LaunchConfiguration("ntrip_fallback_lat"),
                         "ntrip_fallback_lon": LaunchConfiguration("ntrip_fallback_lon"),
                         "rtcm_max_fragments_per_cycle": LaunchConfiguration(
@@ -135,6 +144,7 @@ def generate_launch_description():
             use_standard_topics_arg,
             ntrip_enabled_arg,
             ntrip_mountpoint_arg,
+            ntrip_gga_period_arg,
             ntrip_fallback_lat_arg,
             ntrip_fallback_lon_arg,
             rtcm_max_fragments_arg,

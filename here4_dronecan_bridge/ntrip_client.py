@@ -45,7 +45,9 @@ def nmea_checksum(sentence_body: str) -> str:
     return f"{checksum:02X}"
 
 
-def build_gga(lat_deg: float, lon_deg: float, alt_m: float) -> bytes:
+def build_gga(
+    lat_deg: float, lon_deg: float, alt_m: float, geoid_sep_m: float = 0.0
+) -> bytes:
     """Caster'a gönderilecek NMEA GGA cümlesi.
 
     TUSAGA-Aktif'in tüm mountpoint'lerinde sourcetable nmea=1 diyor: VRS sanal
@@ -63,10 +65,15 @@ def build_gga(lat_deg: float, lon_deg: float, alt_m: float) -> bytes:
     lat_str = f"{int(lat_abs):02d}{(lat_abs - int(lat_abs)) * 60:09.6f}"
     lon_str = f"{int(lon_abs):03d}{(lon_abs - int(lon_abs)) * 60:09.6f}"
 
-    # quality=1 (tek nokta), sats=10, hdop=1.0, geoid ayrımı 0.0
+    # Alan 9 = ortometrik (MSL) yükseklik, alan 11 = jeoit ayrımı N.
+    # Caster elipsoit yüksekliğini MSL + N olarak hesaplar; N'i 0 göndermek
+    # konumumuzu düşey olarak N kadar yanlış bildirmek demektir (Türkiye'de
+    # onlarca metre). Fix2 hem height_msl_mm hem height_ellipsoid_mm verdiği
+    # için N'i tam olarak hesaplayabiliyoruz: N = elipsoit - MSL.
+    # quality=1, sats=10, hdop=1.0 sabit — caster bunları kullanmıyor.
     body = (
         f"GPGGA,{hhmmss},{lat_str},{lat_hemi},{lon_str},{lon_hemi},"
-        f"1,10,1.0,{alt_m:.1f},M,0.0,M,,"
+        f"1,10,1.0,{alt_m:.1f},M,{geoid_sep_m:.1f},M,,"
     )
     return f"${body}*{nmea_checksum(body)}\r\n".encode("ascii")
 
@@ -267,6 +274,17 @@ def fetch_sourcetable(host=DEFAULT_HOST, port=DEFAULT_PORT, timeout_s=15.0) -> s
     return data.decode("latin-1", errors="replace")
 
 
+class StallReconnect(ConnectionError):
+    """Akış durdu diye bilerek koparıldı — geri çekilme (backoff) uygulanmaz.
+
+    05.08.2026 ölçümü bunu haklı çıkarıyor: 24 s'lik bir durak boyunca AYNI
+    caster'a (212.156.70.42:2101, kimliksiz sourcetable) 5 yoklamanın 5'i de
+    ortalama 0.19 s'de başarılı oldu. Yani caster ayakta ve yeni bağlantıya
+    anında veri veriyor; susan yalnızca bizim akan oturumumuz. Beklemek yerine
+    koparıp yeniden bağlanmak ölü süreyi 15-27 s'den ~1 s'ye indirir.
+    """
+
+
 class NtripClient:
     """Arka planda çalışan, kopunca yeniden bağlanan NTRIP istemcisi.
 
@@ -289,6 +307,7 @@ class NtripClient:
         gga_period_s=5.0,
         logger=None,
         reconnect_max_s=30.0,
+        stall_reconnect_s=8.0,
     ):
         self.host = host
         self.port = port
@@ -312,6 +331,25 @@ class NtripClient:
         self.reconnects = 0
         self.last_frame_monotonic = 0.0
         self.types = Counter()
+
+        # Durak (stall) telemetrisi. 05.08.2026 sahada olculdu: TCP ayakta ve
+        # ag saglikli (ping RTT durak icinde 53 ms / disinda 54 ms, sifir kayip)
+        # oldugu halde caster 5-21 s boyunca hic bayt gondermiyor; olu zaman
+        # %13-18. Her durak RTK FIXED kilidini dusuruyor, bu yuzden gorunur
+        # olmasi sart.
+        self.stall_threshold_s = 3.0
+        # Bu kadar bayt gelmezse oturumu koparip yeniden baglan (0 = kapali).
+        self.stall_reconnect_s = stall_reconnect_s
+        self.stall_reconnects = 0
+        self.stalls = 0
+        self.unexpected_errors = 0
+        self.callback_errors = 0
+        # B56: durak koparmayla bitince gercek olu sure ancak veri geri
+        # gelince bilinir; baslangici _stream cagrilari arasinda tasiyoruz.
+        self._stall_since = None
+        self.stalled_seconds = 0.0
+        self.longest_stall_s = 0.0
+        self.last_byte_monotonic = 0.0
 
     # -- kayıt yardımcıları: logger yoksa sessiz kal ------------------- #
     def _info(self, msg):
@@ -362,8 +400,28 @@ class NtripClient:
                 self._error(f"NTRIP kimlik doğrulama hatası: {exc}. İstemci duruyor.")
                 self.connected = False
                 return
+            except StallReconnect as exc:
+                # Caster ayakta, yalnizca bu oturum susmus. Geri cekilme YOK:
+                # beklemek 15-27 s kaybettiriyor, yeni baglanti ~0.2 s.
+                self._warn(f"NTRIP durak nedeniyle yeniden baglaniliyor: {exc}")
+                stall_reconnect = True
             except (OSError, ConnectionError) as exc:
                 self._warn(f"NTRIP bağlantı hatası: {exc}")
+                stall_reconnect = False
+            except Exception as exc:
+                # B55: genel yakalayıcı OLMADAN bu thread sessizce ölüyordu —
+                # yeniden bağlanma denenmiyor, log'a hiçbir şey düşmüyor, tek
+                # belirti status satırındaki `bağlı=False` oluyordu. Beklenmedik
+                # her istisna (ör. callback'ten sızan bir hata) artık burada
+                # yakalanıp normal backoff ile yeniden bağlanmaya dönüyor.
+                self.unexpected_errors += 1
+                self._error(
+                    f"NTRIP beklenmedik hata ({type(exc).__name__}): {exc}. "
+                    "Yeniden bağlanılacak."
+                )
+                stall_reconnect = False
+            else:
+                stall_reconnect = False
             finally:
                 self.connected = False
                 if sock is not None:
@@ -375,6 +433,9 @@ class NtripClient:
             if not self._running:
                 break
             self.reconnects += 1
+            if stall_reconnect:
+                backoff = 1.0
+                continue
             self._warn(f"NTRIP {backoff:.0f} s sonra yeniden denenecek.")
             # Beklerken stop() çağrılırsa hemen çık
             deadline = time.monotonic() + backoff
@@ -388,6 +449,8 @@ class NtripClient:
         sock.settimeout(1.0)
         last_gga = 0.0
         warned_no_position = False
+        self.last_byte_monotonic = time.monotonic()
+        in_stall = False
 
         while self._running:
             now = time.monotonic()
@@ -409,9 +472,51 @@ class NtripClient:
             try:
                 chunk = sock.recv(4096)
             except socket.timeout:
+                # Bayt gelmedi: bu bir durak mi, yoksa normal bosluk mu?
+                # Sadece erken uyari. Sayaclarin TAMAMI asagida, veri geri
+                # geldiginde ve TEK olcute (bosluk >= esik) gore islenir;
+                # yoksa "durak=0 ama olu=3s" gibi celisen loglar cikiyor.
+                bekleme = time.monotonic() - self.last_byte_monotonic
+                if bekleme >= self.stall_threshold_s and not in_stall:
+                    in_stall = True
+                    if self._stall_since is None:
+                        # Durak burada baslar; suresi veri geri gelince kesinlesir.
+                        self.stalls += 1
+                        self._stall_since = self.last_byte_monotonic
+                    self._warn(
+                        f"NTRIP akisi durdu ({bekleme:.0f} s bayt yok). TCP ayakta; "
+                        "caster sustu. RTK FIXED kilidi bu duraklarda dusuyor."
+                    )
+                if self.stall_reconnect_s > 0 and bekleme >= self.stall_reconnect_s:
+                    # Beklemek yerine kopar: yeni baglanti aninda veri veriyor.
+                    # Sure BURADA eklenmez — koparma+yeniden baglanma+akisin
+                    # geri gelmesi de olu zamandir, hepsi _stall_since'ten
+                    # veri donunce hesaplanir (B56).
+                    self.stall_reconnects += 1
+                    raise StallReconnect(
+                        f"{bekleme:.0f} s bayt gelmedi, oturum kopariliyor"
+                    )
                 continue
             if chunk == b"":
                 raise ConnectionError("Caster bağlantıyı kapattı (akış kesildi)")
+
+            simdi = time.monotonic()
+            if self._stall_since is not None:
+                # Durak (varsa koparma dahil) burada kapaniyor.
+                bosluk = simdi - self._stall_since
+                self._stall_since = None
+            elif simdi - self.last_byte_monotonic >= self.stall_threshold_s:
+                # recv() esikten uzun blokladi: zaman asimi yolu hic calismadi.
+                bosluk = simdi - self.last_byte_monotonic
+                self.stalls += 1
+            else:
+                bosluk = 0.0
+            if bosluk > 0.0:
+                self.stalled_seconds += bosluk
+                self.longest_stall_s = max(self.longest_stall_s, bosluk)
+                self._info(f"NTRIP akisi geri geldi ({bosluk:.0f} s durak sonrasi).")
+            in_stall = False
+            self.last_byte_monotonic = simdi
 
             self.total_bytes += len(chunk)
             if decoder is not None:
@@ -423,7 +528,17 @@ class NtripClient:
                 self.total_frames += 1
                 self.last_frame_monotonic = time.monotonic()
                 if self._on_rtcm:
-                    self._on_rtcm(frame)
+                    try:
+                        self._on_rtcm(frame)
+                    except Exception as exc:
+                        # Callback hatasi akisi oldurmemeli (B55). Ilkini
+                        # bildirip sonrakileri sayacta topluyoruz.
+                        self.callback_errors += 1
+                        if self.callback_errors == 1:
+                            self._error(
+                                f"RTCM callback hatasi ({type(exc).__name__}): "
+                                f"{exc}. Akis surduruluyor."
+                            )
 
             self.crc_errors = parser.crc_errors
             self.types = parser.types

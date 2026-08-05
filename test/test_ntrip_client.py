@@ -208,3 +208,153 @@ def test_chunked_akista_rtcm_cerceveleri_bozulmadan_cikar():
     assert parser.crc_errors == 0
     assert set(parser.types) == {1075, 1085, 1095, 1125}
     assert ham.frames < 4, "de-chunk edilmeden kayıp olmalıydı (regresyon kanıtı)"
+
+
+# --- Durak (stall) tespiti ------------------------------------------------ #
+# 05.08.2026 saha olcumu: TCP ayakta, ag saglikli (ping RTT durak icinde
+# 53 ms / disinda 54 ms, sifir kayip) oldugu halde caster 5-21 s hic bayt
+# gondermiyor; olu zaman %13-18 ve her durak RTK FIXED kilidini dusuruyor.
+
+
+class _SahteSocket:
+    """recv() cagrilarini onceden yazilmis bir senaryoya gore dondurur.
+
+    None = socket.timeout (bayt yok), bytes = veri geldi.
+    """
+
+    def __init__(self, senaryo, saat, istemci):
+        self._senaryo = list(senaryo)
+        self._saat = saat
+        self._istemci = istemci
+
+    def settimeout(self, _t):
+        pass
+
+    def sendall(self, _d):
+        pass
+
+    def recv(self, _n):
+        import socket as _s
+
+        if not self._senaryo:
+            # Senaryo bitti: _stream() sonsuz donguye girmesin
+            self._istemci._running = False
+            raise _s.timeout()
+        adim = self._senaryo.pop(0)
+        if adim is None:
+            # Saat YALNIZ bayt gelmeyen turlarda ilerler; boylece senaryodaki
+            # her None tam 1 saniyelik bosluk demek olur.
+            self._saat[0] += 1.0
+            raise _s.timeout()
+        return adim
+
+
+def test_durak_sayaci_kisa_bosluklari_saymaz(monkeypatch):
+    from here4_dronecan_bridge import ntrip_client as nc
+
+    saat = [1000.0]
+    monkeypatch.setattr(nc.time, "monotonic", lambda: saat[0])
+
+    veri = make_frame(1075, 20)
+    # 2 s bosluk esigin (3 s) altinda -> durak sayilmamali
+    senaryo = [veri, None, None, veri, veri]
+    c = nc.NtripClient(on_rtcm=lambda f: None, get_position=lambda: (37.0, 35.0, 100.0))
+    c._running = True
+    c._stream(_SahteSocket(senaryo, saat, c), is_chunked=False)
+
+    assert c.stalls == 0
+    assert c.longest_stall_s == 0.0
+
+
+def test_durak_sayaci_uzun_bosluklari_yakalar(monkeypatch):
+    from here4_dronecan_bridge import ntrip_client as nc
+
+    saat = [1000.0]
+    monkeypatch.setattr(nc.time, "monotonic", lambda: saat[0])
+
+    veri = make_frame(1075, 20)
+    # 5 s bayt yok -> tek durak, olu sure kaydedilmeli
+    senaryo = [veri] + [None] * 5 + [veri]
+    c = nc.NtripClient(on_rtcm=lambda f: None, get_position=lambda: (37.0, 35.0, 100.0))
+    c._running = True
+    c._stream(_SahteSocket(senaryo, saat, c), is_chunked=False)
+
+    assert c.stalls == 1, "3 s'yi asan bosluk durak sayilmali"
+    assert c.longest_stall_s >= 5.0
+    assert c.stalled_seconds >= 5.0
+
+
+def test_uzun_durakta_oturum_kopariliyor(monkeypatch):
+    """Caster ayakta ama oturum susmus -> beklemek yerine kopar.
+
+    05.08.2026 olcumu: 24 s'lik durak boyunca AYNI caster'a yapilan 5 kimliksiz
+    yoklamanin 5'i de ortalama 0.19 s'de basarili oldu. Yeni baglanti aninda
+    veri veriyorken 15-27 s beklemek saf kayip.
+    """
+    from here4_dronecan_bridge import ntrip_client as nc
+
+    saat = [1000.0]
+    monkeypatch.setattr(nc.time, "monotonic", lambda: saat[0])
+
+    veri = make_frame(1075, 20)
+    c = nc.NtripClient(
+        on_rtcm=lambda f: None,
+        get_position=lambda: (37.0, 35.0, 100.0),
+        stall_reconnect_s=8.0,
+    )
+    c._running = True
+    with pytest.raises(nc.StallReconnect):
+        c._stream(_SahteSocket([veri] + [None] * 20, saat, c), is_chunked=False)
+
+    assert c.stall_reconnects == 1
+    assert c.stalls == 1
+    # B56: sure koparma aninda BILINMEZ — koparma+yeniden baglanma+akisin
+    # geri gelmesi de olu zamandir, hepsi veri donunce hesaplanir.
+    assert c.stalled_seconds == 0.0
+    assert c._stall_since is not None
+
+
+def test_kopma_esigi_kapatilabiliyor(monkeypatch):
+    """stall_reconnect_s=0 -> eski davranis: bekle, koparma."""
+    from here4_dronecan_bridge import ntrip_client as nc
+
+    saat = [1000.0]
+    monkeypatch.setattr(nc.time, "monotonic", lambda: saat[0])
+
+    veri = make_frame(1075, 20)
+    c = nc.NtripClient(
+        on_rtcm=lambda f: None,
+        get_position=lambda: (37.0, 35.0, 100.0),
+        stall_reconnect_s=0.0,
+    )
+    c._running = True
+    c._stream(_SahteSocket([veri] + [None] * 20, saat, c), is_chunked=False)
+
+    assert c.stall_reconnects == 0
+
+
+def test_gga_jeoit_ayrimi_alani_dolduruluyor():
+    """GGA alan 11 = jeoit ayrımı N; caster elipsoit yüksekliği = MSL + N sanar.
+
+    Sabit 0 göndermek konumu düşey olarak N kadar yanlış bildirir.
+    """
+    fields = build_gga(37.05, 35.37, 103.0, geoid_sep_m=36.2).decode("ascii").split(",")
+    assert fields[9] == "103.0", "alan 9 ortometrik (MSL) yükseklik"
+    assert fields[10] == "M"
+    assert fields[11] == "36.2", "alan 11 jeoit ayrımı"
+    assert fields[12] == "M"
+
+
+def test_gga_jeoit_ayrimi_varsayilani_sifir():
+    """Geriye uyum: parametre verilmezse eski davranış (0.0)."""
+    fields = build_gga(37.05, 35.37, 103.0).decode("ascii").split(",")
+    assert fields[11] == "0.0"
+
+
+def test_gga_jeoit_ayrimli_checksum_gecerli():
+    sentence = build_gga(37.05, 35.37, 103.0, geoid_sep_m=36.2).decode("ascii")
+    body, checksum = sentence.strip()[1:].split("*")
+    expected = 0
+    for char in body:
+        expected ^= ord(char)
+    assert checksum == f"{expected:02X}"

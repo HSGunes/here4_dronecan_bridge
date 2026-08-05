@@ -131,6 +131,11 @@ class Here4BridgeNode(Node):
         self.declare_parameter("ntrip_user", "")
         self.declare_parameter("ntrip_password", "")
         self.declare_parameter("ntrip_gga_period", 5.0)
+        # Akis bu kadar saniye susarsa oturumu koparip yeniden baglan (0=kapali).
+        # 05.08.2026 olcumu: 24 s'lik durak boyunca AYNI caster'a yapilan 5
+        # kimliksiz yoklamanin 5'i de 0.19 s'de basarili oldu -> caster ayakta,
+        # susan yalniz bizim oturumumuz. Beklemek yerine kopariyoruz.
+        self.declare_parameter("ntrip_stall_reconnect_s", 8.0)
         # Konum gelmeden VRS akıtmaz. Fix yokken (kapalı alan testi) GGA
         # gönderebilmek için: 0.0 = kapalı, gerçek fix gelince otomatik bırakılır.
         self.declare_parameter("ntrip_fallback_lat", 0.0)
@@ -140,11 +145,18 @@ class Here4BridgeNode(Node):
         # 2 ms'lik frame arası bekleme seri OKUMAYI ARTIK DURDURMUYOR — eski
         # "RX körlüğü" gerekçesi geçersiz (ölçüm: IMU boşluğu 686 ms -> 20 ms).
         # Kalan kısıt gecikme: parça kuyrukta beklerse düzeltme bayatlar ve RTK
-        # FIXED'e geçiş uzar. 2 -> 4 ölçümle seçildi:
-        #   budget=2: kapasite ~10 parça/s, ihtiyaç 9.3 -> marj %7, yaş 0.71 s,
-        #             FIXED ~6 dk
-        #   budget=4: marj %115, yaş 0.57 s, FIXED ~1.40 dk
-        # Üst sınırı test_parca_butcesi_tty_tamponunu_tasirmiyor koruyor.
+        # FIXED'e geçiş uzar. Saha ölçümleri:
+        #   budget=2: kapasite ~10 parça/s, marj %7,   yaş 0.71 s, FIXED ~6 dk
+        #   budget=4: marj %115,                        yaş 0.57 s, FIXED ~1.40 dk
+        # 05.08.2026: bütçeyi 12'ye çıkarmayı denedik — epoch yayılması CAN'de
+        # 338 -> 128 ms indi AMA 8 dakikada hiç FIXED gelmedi (bütçe=4 ile
+        # ölçülen 1.4 dk'ya karşı). Gecikme argümanı doğruydu, sonuç yanlıştı.
+        # Sebebi ArduPilot GPS_Backend.cpp'de: inject_data(), GPS UART'ının TX
+        # tamponunda yer yoksa veriyi SESSİZCE DÜŞÜRÜYOR
+        #     if (port->txspace() > len) port->write(...); else Debug(...)
+        # Patlamayı sıkıştırmak bu tamponun üstündeki baskıyı artırıyor. Yani
+        # bütçenin ÜST sınırı gecikme değil, Here4'ün iç UART tamponu — ve onu
+        # dışarıdan gözleyemiyoruz. Ölçülmüş en iyi değer 4'te kalıyor.
         self.declare_parameter("rtcm_max_fragments_per_cycle", 4)
         # F9P'nin çözemediği RTCM mesajlarını CAN'e hiç koyma. Farklı bir
         # alıcı kullanılırsa false yapılabilir.
@@ -225,6 +237,12 @@ class Here4BridgeNode(Node):
         self._rtcm_dropped_fragments = 0
         self._rtcm_broadcast_errors = 0
         self._rtcm_filtered_frames = 0
+        # NTRIP thread'i ROS API'sine HIC dokunmamali (B55): rclpy parametre
+        # erisimi executor disindan yapiliyor ve kapanis yarislarinda istisna
+        # atabiliyor; o istisna NTRIP thread'ini olduruyordu. Bu iki deger
+        # spin thread'inde tazelenip buradan okunur.
+        self._filter_unsupported_cached = True
+        self._fallback_position_cached = None
         # GGA için son konum. Tek parça tuple olarak atanır; GIL altında
         # atomik okunur/yazılır, bu yüzden kilide gerek yok.
         self._last_fix_position = None
@@ -340,6 +358,7 @@ class Here4BridgeNode(Node):
 
                 if self._ntrip_client is not None and now - last_rtcm_report > 10.0:
                     last_rtcm_report = now
+                    self._refresh_ntrip_param_cache()
                     self._log_rtcm_status()
 
             except Exception:
@@ -383,19 +402,31 @@ class Here4BridgeNode(Node):
             on_rtcm=self._on_rtcm_frame,
             get_position=self._get_gga_position,
             gga_period_s=self.get_parameter("ntrip_gga_period").value,
+            stall_reconnect_s=self.get_parameter("ntrip_stall_reconnect_s").value,
             logger=self.get_logger(),
         )
+        self._refresh_ntrip_param_cache()
         self._ntrip_client.start()
+
+    def _refresh_ntrip_param_cache(self):
+        """NTRIP thread'inin kullandigi parametreleri spin thread'inde tazeler.
+
+        Boylece NTRIP thread'i rclpy'ye hic dokunmaz (B55).
+        """
+        self._filter_unsupported_cached = bool(
+            self.get_parameter("rtcm_filter_unsupported").value
+        )
+        lat = self.get_parameter("ntrip_fallback_lat").value
+        lon = self.get_parameter("ntrip_fallback_lon").value
+        self._fallback_position_cached = (
+            (lat, lon, 100.0, 0.0) if (lat != 0.0 or lon != 0.0) else None
+        )
 
     def _get_gga_position(self):
         """NTRIP thread'i için GGA konumu; fix yoksa fallback, o da yoksa None."""
         if self._last_fix_position is not None:
             return self._last_fix_position
-        lat = self.get_parameter("ntrip_fallback_lat").value
-        lon = self.get_parameter("ntrip_fallback_lon").value
-        if lat != 0.0 or lon != 0.0:
-            return (lat, lon, 100.0)
-        return None
+        return self._fallback_position_cached
 
     def _on_rtcm_frame(self, frame):
         """NTRIP thread'inden çağrılır — sadece kuyruğa yaz, CAN'e dokunma.
@@ -405,7 +436,7 @@ class Here4BridgeNode(Node):
         """
         # Alıcının çözemeyeceği mesajı CAN'e koymanın tek etkisi adaptörün
         # TX bütçesini yemek olur (bkz. F9P_RTCM_INPUT_TYPES).
-        if len(frame) >= 5 and self.get_parameter("rtcm_filter_unsupported").value:
+        if len(frame) >= 5 and self._filter_unsupported_cached:
             msg_type = (frame[3] << 4) | (frame[4] >> 4)
             if msg_type not in F9P_RTCM_INPUT_TYPES:
                 self._rtcm_filtered_frames += 1
@@ -461,6 +492,11 @@ class Here4BridgeNode(Node):
             f"dusen={self._rtcm_dropped_fragments} "
             f"yayin_hatasi={self._rtcm_broadcast_errors} "
             f"crc_hata={client.crc_errors} yeniden_baglanma={client.reconnects} "
+            f"| durak={client.stalls} olu={client.stalled_seconds:.0f}s "
+            f"durak_baglanti={client.stall_reconnects} "
+            f"beklenmedik={client.unexpected_errors} "
+            f"callback_hata={client.callback_errors} "
+            f"enuzun={client.longest_stall_s:.0f}s "
             f"| GPS: {quality} uere={self._select_uere():.2f}"
         )
         if (
@@ -607,8 +643,25 @@ class Here4BridgeNode(Node):
         msg.status = status
 
         # NTRIP thread'inin GGA'sı için son konumu sakla (tek atama = atomik).
+        # Jeoit ayrımı N = elipsoit - MSL; GGA'da alan 11 bunu ister ve caster
+        # elipsoit yüksekliğimizi MSL + N olarak hesaplar. Sabit 0 göndermek
+        # konumumuzu düşey olarak N kadar yanlış bildirir.
+        # DİKKAT (05.08.2026 ölçümü): Here4 AP_Periph firmware'i iki alanı da
+        # AYNI değerle dolduruyor (ikisi de 103670 mm), yani N burada 0 çıkıyor
+        # ve pratikte eski sabit davranışla aynı. Gerçek jeoit ayrımı gerekirse
+        # bir jeoit modeli (EGM96/TG03) gerekir — alıcıdan türetilemiyor.
         if dronecan_status >= 2:
-            self._last_fix_position = (msg.latitude, msg.longitude, msg.altitude)
+            geoid_sep = 0.0
+            msl_mm = getattr(fix2, "height_msl_mm", 0)
+            ell_mm = getattr(fix2, "height_ellipsoid_mm", 0)
+            if msl_mm and ell_mm:
+                geoid_sep = (ell_mm - msl_mm) / 1e3
+            self._last_fix_position = (
+                msg.latitude,
+                msg.longitude,
+                msg.altitude,
+                geoid_sep,
+            )
 
         # --- Covariance calculation ---
         if self._hdop > 0.0 and self._vdop > 0.0:

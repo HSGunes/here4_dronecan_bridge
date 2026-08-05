@@ -47,6 +47,7 @@ def temiz_kuyruk(node):
             break
     node._rtcm_dropped_fragments = 0
     node._last_fix_position = None
+    node._refresh_ntrip_param_cache()
 
 
 def kuyrugu_bosalt(node):
@@ -125,6 +126,7 @@ def make_fix2(status, mode, sub_mode):
     fix.latitude_deg_1e8 = int(37.053 * 1e8)
     fix.longitude_deg_1e8 = int(35.3213 * 1e8)
     fix.height_msl_mm = 25000
+    fix.height_ellipsoid_mm = 36000  # N = 36.0 - 25.0 = 11.0 m
     return fix
 
 
@@ -178,9 +180,15 @@ def test_gga_konumu_sadece_gecerli_fixte_guncellenir(node):
 
     node._handle_gnss_fix2(_FakeEvent(make_fix2(3, 2, 1)))
     assert node._last_fix_position is not None
-    lat, lon, _alt = node._last_fix_position
+    lat, lon, alt, geoid_sep = node._last_fix_position
     assert lat == pytest.approx(37.053, abs=1e-6)
     assert lon == pytest.approx(35.3213, abs=1e-6)
+    # Jeoit ayrımı N = elipsoit - MSL. GGA alan 11'e bu gider; sabit 0
+    # göndermek konumumuzu düşey olarak N kadar yanlış bildirir.
+    assert alt == pytest.approx(25.0, abs=1e-3), "GGA yüksekliği MSL olmalı"
+    assert geoid_sep == pytest.approx(11.0, abs=1e-3), (
+        "N, Fix2'nin iki yükseklik alanından hesaplanmalı"
+    )
 
 
 def test_fallback_konum_davranisi(node):
@@ -192,45 +200,61 @@ def test_fallback_konum_davranisi(node):
             rclpy.parameter.Parameter("ntrip_fallback_lon", value=35.3),
         ]
     )
-    assert node._get_gga_position() == (37.0, 35.3, 100.0)
+    # B55: NTRIP thread'i rclpy'ye dokunmaz; parametreler spin thread'inde
+    # onbellege alinir. Degisikligin gecerli olmasi icin tazeleme sart.
+    node._refresh_ntrip_param_cache()
+    assert node._get_gga_position() == (37.0, 35.3, 100.0, 0.0)
 
-    node._last_fix_position = (1.0, 2.0, 3.0)
-    assert node._get_gga_position() == (1.0, 2.0, 3.0), "gerçek fix fallback'i ezer"
-
-
-# --- Waveshare TX bütçesi koruması ---------------------------------------- #
-# 28.07.2026: köprüde TX ayrı thread'e alındı, yani frame arası bekleme artık
-# seri OKUMAYI durdurmuyor — eski "RX körlüğü" gerekçesi geçersiz (CAN seviyesi
-# ölçüm: IMU boşluğu 686 ms -> 20 ms, budget=4 + 1 ms ile 0 boşluk).
-# Aşağıdaki koruma yine de bütçenin sınırsız büyümesine karşı üst sınır bırakır:
-# en kötü durum (TX'in RX'i bloke ettiği eski mimari) varsayımıyla hesaplar.
+    node._last_fix_position = (1.0, 2.0, 3.0, 4.0)
+    assert node._get_gga_position() == (1.0, 2.0, 3.0, 4.0), "gerçek fix fallback'i ezer"
 
 
-def test_parca_butcesi_tty_tamponunu_tasirmiyor(node):
-    """Asıl kısıt: körlük süresince biriken IMU verisi tty tamponuna sığmalı.
+# --- RTCM parça bütçesi ---------------------------------------------------- #
+# 28.07.2026: Waveshare köprüsünde TX ayrı thread'e alındı, yani frame arası
+# bekleme artık seri OKUMAYI durdurmuyor. Eski "RX körlüğü / tty taşması"
+# gerekçesi GEÇERSİZ (ölçüm: IMU boşluğu 686 ms -> 20 ms).
+#
+# Bütçenin bugünkü iki işlevi:
+#   1) ALT sınır — bir RTCM epoch'u tek spin turunda boşalabilmeli. 05.08.2026
+#      CAN ölçümü: epoch = 155 CAN frame ~= 8-12 parça, gözlenen yayılma 338 ms.
+#      Bütçe epoch'tan küçükse epoch birden çok tura yayılır ve her düzeltme
+#      gereksiz yere gecikir (saha: gecikme düştükçe FIXED süresi 360->100->60 s).
+#   2) ÜST sınır — durak sonrası kuyruk birikirse tek patlama adaptörün TX
+#      hattını bir epoch süresinden (1 s) uzun meşgul etmemeli.
 
-    Zincir: bir parça = 19 CAN frame; her frame'den sonra köprü 2 ms uyuyor ve
-    o sırada seri porttan okumuyor. Here4 bu boyunca 100 Hz IMU (7 frame) =
-    700 frame/s basmaya devam ediyor. Okunmayan her frame Waveshare paketi
-    olarak (0xAA + tip + 4 ID + <=8 veri + 0x55 = 15 bayt) tty tamponunda
-    birikiyor. Taşarsa IMU frame'leri düşer, DroneCAN transferi bozulur ve
-    spin döngüsündeki genel `except` bunu sessizce yutar.
+
+def test_parca_butcesi_gelen_hizi_marjla_karsilayabiliyor(node):
+    """Alt sınır: pompa, NTRIP'ten gelen parça hızını marjla karşılayabilmeli.
+
+    Epoch'u tek turda boşaltmak CAZİP AMA YANLIŞ bir hedef: bütçe=12 denendi,
+    CAN'de yayılma 338 -> 128 ms indi ama 8 dakikada hiç FIXED gelmedi
+    (bütçe=4'te ölçülen 1.4 dk'ya karşı). Üst sınırı gecikme değil, Here4'ün
+    iç GPS UART tamponu belirliyor — ArduPilot inject_data() yer yoksa veriyi
+    sessizce düşürüyor. O yüzden alt sınır sadece "yetişebiliyor mu" olmalı.
     """
     budget = node.get_parameter("rtcm_max_fragments_per_cycle").value
+    SPIN_CYCLES_PER_S = 5.0  # ölçülen pompa turu hızı
+    DEMAND_FRAGMENTS_PER_S = 9.3  # ölçülen NTRIP parça hızı
+    MARGIN = 1.5
+
+    capacity = budget * SPIN_CYCLES_PER_S
+    assert capacity >= DEMAND_FRAGMENTS_PER_S * MARGIN, (
+        f"bütçe={budget} -> kapasite {capacity:.0f} parça/s, "
+        f"ihtiyaç {DEMAND_FRAGMENTS_PER_S} -> marj yetersiz, kuyruk birikir"
+    )
+
+
+def test_parca_butcesi_tx_hattini_bir_epochtan_uzun_mesgul_etmiyor(node):
+    """Durak sonrası kuyruk birikirse tek patlama TX'i kilitlememeli."""
+    budget = node.get_parameter("rtcm_max_fragments_per_cycle").value
     CAN_FRAMES_PER_FRAGMENT = 19  # ölçüldü: 128 B RTCMStream -> 19 CAN frame
-    WAVESHARE_SLEEP_S = 0.001  # waveshare_socketcan_bridge.py tx_sleep default
-    IMU_FRAMES_PER_S = 700  # 100 Hz RawIMU x 7 CAN frame
-    WAVESHARE_PACKET_BYTES = 15
-    TTY_BUFFER_BYTES = 4096  # tipik Linux seri port tamponu
+    WAVESHARE_TX_SLEEP_S = 0.001  # waveshare_socketcan_bridge.py tx_sleep default
+    EPOCH_PERIOD_S = 1.0  # RTCM epoch'ları 1 Hz
 
-    blackout_s = budget * CAN_FRAMES_PER_FRAGMENT * WAVESHARE_SLEEP_S
-    buffered = blackout_s * IMU_FRAMES_PER_S * WAVESHARE_PACKET_BYTES
-    doluluk = buffered / TTY_BUFFER_BYTES
-
-    assert doluluk <= 0.50, (
-        f"bütçe={budget} -> {blackout_s * 1000:.0f} ms RX körlüğü -> "
-        f"{buffered:.0f} B birikir = tty tamponunun %{doluluk * 100:.0f}'i. "
-        "Güvenlik payı için %50'nin altında kalmalı."
+    burst_s = budget * CAN_FRAMES_PER_FRAGMENT * WAVESHARE_TX_SLEEP_S
+    assert burst_s <= EPOCH_PERIOD_S, (
+        f"bütçe={budget} -> tek patlama TX'i {burst_s * 1000:.0f} ms meşgul eder; "
+        "bir epoch periyodundan (1000 ms) uzun olmamalı"
     )
 
 
@@ -267,6 +291,7 @@ def test_filtre_kapatilabiliyor(node):
     node.set_parameters(
         [rclpy.parameter.Parameter("rtcm_filter_unsupported", value=False)]
     )
+    node._refresh_ntrip_param_cache()
     try:
         node._on_rtcm_frame(make_rtcm_frame(4094, 60))
         assert kuyrugu_bosalt(node), "filtre kapalıyken her mesaj geçmeli"
@@ -274,3 +299,4 @@ def test_filtre_kapatilabiliyor(node):
         node.set_parameters(
             [rclpy.parameter.Parameter("rtcm_filter_unsupported", value=True)]
         )
+        node._refresh_ntrip_param_cache()
