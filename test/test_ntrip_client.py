@@ -358,3 +358,21 @@ def test_gga_jeoit_ayrimli_checksum_gecerli():
     for char in body:
         expected ^= ord(char)
     assert checksum == f"{expected:02X}"
+
+
+def test_gga_quality_alani_parametreden_geliyor():
+    """Alan 6 = fix kalitesi; varsayılan 1 (geriye uyum), RTK'da 4/5."""
+    for q in (1, 2, 4, 5):
+        fields = build_gga(37.05, 35.37, 103.0, 36.2, quality=q).decode().split(",")
+        assert fields[6] == str(q)
+    # varsayılan hâlâ 1
+    assert build_gga(37.05, 35.37, 103.0).decode().split(",")[6] == "1"
+
+
+def test_gga_quality_ile_checksum_gecerli():
+    sentence = build_gga(37.05, 35.37, 103.0, 36.2, quality=4).decode("ascii")
+    body, checksum = sentence.strip()[1:].split("*")
+    expected = 0
+    for char in body:
+        expected ^= ord(char)
+    assert checksum == f"{expected:02X}"

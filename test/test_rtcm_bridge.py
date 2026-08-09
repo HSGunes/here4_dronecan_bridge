@@ -180,7 +180,7 @@ def test_gga_konumu_sadece_gecerli_fixte_guncellenir(node):
 
     node._handle_gnss_fix2(_FakeEvent(make_fix2(3, 2, 1)))
     assert node._last_fix_position is not None
-    lat, lon, alt, geoid_sep = node._last_fix_position
+    lat, lon, alt, geoid_sep, gga_quality = node._last_fix_position
     assert lat == pytest.approx(37.053, abs=1e-6)
     assert lon == pytest.approx(35.3213, abs=1e-6)
     # Jeoit ayrımı N = elipsoit - MSL. GGA alan 11'e bu gider; sabit 0
@@ -189,6 +189,7 @@ def test_gga_konumu_sadece_gecerli_fixte_guncellenir(node):
     assert geoid_sep == pytest.approx(11.0, abs=1e-3), (
         "N, Fix2'nin iki yükseklik alanından hesaplanmalı"
     )
+    assert gga_quality == 4, "RTK FIXED -> NMEA quality 4"
 
 
 def test_fallback_konum_davranisi(node):
@@ -203,10 +204,16 @@ def test_fallback_konum_davranisi(node):
     # B55: NTRIP thread'i rclpy'ye dokunmaz; parametreler spin thread'inde
     # onbellege alinir. Degisikligin gecerli olmasi icin tazeleme sart.
     node._refresh_ntrip_param_cache()
-    assert node._get_gga_position() == (37.0, 35.3, 100.0, 0.0)
+    assert node._get_gga_position() == (37.0, 35.3, 100.0, 0.0, 1)
 
-    node._last_fix_position = (1.0, 2.0, 3.0, 4.0)
-    assert node._get_gga_position() == (1.0, 2.0, 3.0, 4.0), "gerçek fix fallback'i ezer"
+    node._last_fix_position = (1.0, 2.0, 3.0, 4.0, 5)
+    assert node._get_gga_position() == (
+        1.0,
+        2.0,
+        3.0,
+        4.0,
+        5,
+    ), "gerçek fix fallback'i ezer"
 
 
 # --- RTCM parça bütçesi ---------------------------------------------------- #
@@ -300,3 +307,19 @@ def test_filtre_kapatilabiliyor(node):
             [rclpy.parameter.Parameter("rtcm_filter_unsupported", value=True)]
         )
         node._refresh_ntrip_param_cache()
+
+
+@pytest.mark.parametrize(
+    "mode,sub_mode,beklenen_quality",
+    [
+        (2, 1, 4),  # RTK FIXED
+        (2, 0, 5),  # RTK FLOAT
+        (1, 0, 2),  # DGPS
+        (0, 0, 1),  # SINGLE
+    ],
+)
+def test_gga_kalitesi_cozum_kalitesini_yansitiyor(node, mode, sub_mode, beklenen_quality):
+    """GGA alan 6, caster oturum log'larında görünür; hep 1 göndermek bizi
+    "standalone" gösteriyordu (TKGM destek görüşmesinde kafa karıştırır)."""
+    node._handle_gnss_fix2(_FakeEvent(make_fix2(3, mode, sub_mode)))
+    assert node._last_fix_position[4] == beklenen_quality

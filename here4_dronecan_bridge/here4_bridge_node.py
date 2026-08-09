@@ -149,14 +149,17 @@ class Here4BridgeNode(Node):
         #   budget=2: kapasite ~10 parça/s, marj %7,   yaş 0.71 s, FIXED ~6 dk
         #   budget=4: marj %115,                        yaş 0.57 s, FIXED ~1.40 dk
         # 05.08.2026: bütçeyi 12'ye çıkarmayı denedik — epoch yayılması CAN'de
-        # 338 -> 128 ms indi AMA 8 dakikada hiç FIXED gelmedi (bütçe=4 ile
-        # ölçülen 1.4 dk'ya karşı). Gecikme argümanı doğruydu, sonuç yanlıştı.
-        # Sebebi ArduPilot GPS_Backend.cpp'de: inject_data(), GPS UART'ının TX
-        # tamponunda yer yoksa veriyi SESSİZCE DÜŞÜRÜYOR
-        #     if (port->txspace() > len) port->write(...); else Debug(...)
-        # Patlamayı sıkıştırmak bu tamponun üstündeki baskıyı artırıyor. Yani
-        # bütçenin ÜST sınırı gecikme değil, Here4'ün iç UART tamponu — ve onu
-        # dışarıdan gözleyemiyoruz. Ölçülmüş en iyi değer 4'te kalıyor.
+        # 338 -> 128 ms indi AMA 8 dakikada hiç FIXED gelmedi; 4'e geri dönüldü.
+        # DÜZELTME (06.08): o gün suçu "GPS UART 38400 baud, txspace taşıyor"
+        # teorisine atmıştık — YANLIŞ. AP_GPS.cpp tespit sırasında u-blox'a
+        # UBLOX_SET_BINARY_230400 blob'u gönderir; SERIAL3_BAUD=38 yalnız
+        # başlangıç değeridir, GPS_AUTO_CONFIG=1 + GPS_DRV_OPTIONS=0 ile alıcı
+        # ve port 230400'de (~23 KB/s) çalışır. inject_data()'nın txspace
+        # düşürmesi bu hızda pratikte tetiklenmez. bütçe=12 testi, sonradan
+        # çoklu-yol sorunlu olduğu kanıtlanan noktada koşmuştu (uydu 22-26,
+        # HDOP 3.5'e kadar) — sonucu ortam kirletti, bütçe suçlu olmayabilir.
+        # 4, ölçülmüş ve iyi çalışan değer olarak kalıyor; 12'yi ancak açık
+        # alanda, FIXED alınan bir noktada A/B ile yeniden denemek anlamlı.
         self.declare_parameter("rtcm_max_fragments_per_cycle", 4)
         # F9P'nin çözemediği RTCM mesajlarını CAN'e hiç koyma. Farklı bir
         # alıcı kullanılırsa false yapılabilir.
@@ -419,7 +422,7 @@ class Here4BridgeNode(Node):
         lat = self.get_parameter("ntrip_fallback_lat").value
         lon = self.get_parameter("ntrip_fallback_lon").value
         self._fallback_position_cached = (
-            (lat, lon, 100.0, 0.0) if (lat != 0.0 or lon != 0.0) else None
+            (lat, lon, 100.0, 0.0, 1) if (lat != 0.0 or lon != 0.0) else None
         )
 
     def _get_gga_position(self):
@@ -656,11 +659,21 @@ class Here4BridgeNode(Node):
             ell_mm = getattr(fix2, "height_ellipsoid_mm", 0)
             if msl_mm and ell_mm:
                 geoid_sep = (ell_mm - msl_mm) / 1e3
+            # NMEA GGA kalitesi: 1=SPS, 2=DGPS, 4=RTK FIXED, 5=RTK FLOAT.
+            # Caster bunu düzeltme üretmek için kullanmaz ama oturum log'una
+            # yazar; hep 1 göndermek bizi "standalone" gösteriyordu.
+            if fix_mode == 2:
+                gga_quality = 4 if fix_sub_mode == 1 else 5
+            elif fix_mode == 1:
+                gga_quality = 2
+            else:
+                gga_quality = 1
             self._last_fix_position = (
                 msg.latitude,
                 msg.longitude,
                 msg.altitude,
                 geoid_sep,
+                gga_quality,
             )
 
         # --- Covariance calculation ---

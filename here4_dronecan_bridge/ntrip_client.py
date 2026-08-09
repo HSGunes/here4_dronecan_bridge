@@ -46,7 +46,11 @@ def nmea_checksum(sentence_body: str) -> str:
 
 
 def build_gga(
-    lat_deg: float, lon_deg: float, alt_m: float, geoid_sep_m: float = 0.0
+    lat_deg: float,
+    lon_deg: float,
+    alt_m: float,
+    geoid_sep_m: float = 0.0,
+    quality: int = 1,
 ) -> bytes:
     """Caster'a gönderilecek NMEA GGA cümlesi.
 
@@ -65,15 +69,19 @@ def build_gga(
     lat_str = f"{int(lat_abs):02d}{(lat_abs - int(lat_abs)) * 60:09.6f}"
     lon_str = f"{int(lon_abs):03d}{(lon_abs - int(lon_abs)) * 60:09.6f}"
 
+    # Alan 6 = fix kalitesi (NMEA: 1=SPS, 2=DGPS, 4=RTK FIXED, 5=RTK FLOAT).
+    # Caster'lar düzeltme üretmek için bunu kullanmaz ama oturum log'larına
+    # yazar; gerçek kaliteyi bildirmek TKGM destek görüşmesinde bizi hep
+    # "standalone" görünmekten kurtarır.
     # Alan 9 = ortometrik (MSL) yükseklik, alan 11 = jeoit ayrımı N.
     # Caster elipsoit yüksekliğini MSL + N olarak hesaplar; N'i 0 göndermek
     # konumumuzu düşey olarak N kadar yanlış bildirmek demektir (Türkiye'de
     # onlarca metre). Fix2 hem height_msl_mm hem height_ellipsoid_mm verdiği
     # için N'i tam olarak hesaplayabiliyoruz: N = elipsoit - MSL.
-    # quality=1, sats=10, hdop=1.0 sabit — caster bunları kullanmıyor.
+    # sats=10, hdop=1.0 sabit — caster bunları kullanmıyor.
     body = (
         f"GPGGA,{hhmmss},{lat_str},{lat_hemi},{lon_str},{lon_hemi},"
-        f"1,10,1.0,{alt_m:.1f},M,{geoid_sep_m:.1f},M,,"
+        f"{int(quality)},10,1.0,{alt_m:.1f},M,{geoid_sep_m:.1f},M,,"
     )
     return f"${body}*{nmea_checksum(body)}\r\n".encode("ascii")
 
