@@ -186,6 +186,55 @@ The script only reads — it needs neither CAN nor the Here 4. It reports byte r
 and decoded RTCM message types. `--sourcetable` dumps the caster's stream list
 without sending any credentials.
 
+### Time to RTK FIXED — what actually moves the needle
+
+Measured on the vehicle: corrections start flowing ~10 s after node start
+(NTRIP + GGA + VRS). The long part is **FLOAT → FIXED**, and it ranged from
+10 s (open sky) to 145 s (next to buildings). Three levers, in order of impact:
+
+**1. GPS L5 health override — `GPS_DRV_OPTIONS` bit 5 (value 32)**
+
+The NEO-F9P datasheet states: *"GPS L5 signals are pre-operational and not used
+by default."* L5 satellites flag themselves unhealthy in the nav message, so the
+receiver discards them. ArduPilot exposes the override
+(`GPSL5HealthOverride` → `CFG-SIGNAL-L5_HEALTH_OVR`), but our device ships with
+`GPS_DRV_OPTIONS = 0`.
+
+This matters because the Here 4 is an **L1/L5** receiver — it cannot use L2 at
+all. With L5 discarded, GPS contributes to ambiguity resolution on **L1 only**,
+i.e. the largest constellation goes single-frequency. TUSAGA *does* send GPS L5
+(`5X` present in every MSM epoch we captured); the rover is refusing it.
+Galileo (E1+E5a) and BeiDou (B1+B2a) are unaffected and stay dual-frequency.
+
+```bash
+ros2 run here4_dronecan_bridge set_gps_l5 --show     # read current value
+ros2 run here4_dronecan_bridge set_gps_l5 --enable   # set bit 5, save, then reboot the Here 4
+```
+
+Stop the bridge node first — the tool opens its own DroneCAN node on the same
+bus. u-blox advises against this setting for safety-of-life systems (a genuinely
+bad L5 signal can enter the solution), so A/B it at a fixed spot before keeping it.
+
+**2. Antenna environment — still the dominant factor**
+
+Open sky converged in 10–40 s; next to buildings and trees it took 145 s or
+never. HDOP is not a proxy for this: we measured HDOP 0.74 (excellent geometry)
+while the receiver sat in FLOAT — HDOP measures geometry, not signal cleanliness.
+Mount the antenna at the centre of a metal roof (the sheet metal acts as a ground
+plane and kills reflections from below); a plastic or composite mast makes
+multipath worse.
+
+**3. Cold-start head start — position cache (automatic)**
+
+GGA cannot be sent before the receiver has its own fix, so a cold start waits
+serially: acquire → GGA → VRS spins up → RTCM flows. The node now persists the
+last known position to `ntrip_position_cache`
+(default `~/.ros/here4_last_position.json`, written every 60 s, atomic
+replace) and uses it as the GGA position at startup, so the VRS is already
+streaming while the receiver is still searching. A real fix overrides it
+immediately; `ntrip_fallback_lat`/`_lon`, if set, take priority over the cache.
+Set the parameter to `""` to disable persistence.
+
 ### Checking that it worked
 
 ```bash
@@ -213,7 +262,8 @@ and the current fix quality.
 | `ntrip_mountpoint` | `VRSRTCM34` | Correction stream. |
 | `ntrip_user` / `ntrip_password` | `""` | Falls back to `TUSAGA_USER` / `TUSAGA_PASS`. |
 | `ntrip_gga_period` | `5.0` | Seconds between GGA uplinks. |
-| `ntrip_fallback_lat` / `_lon` | `0.0` | GGA position to use before the first fix (`0` = disabled). Useful for indoor testing; a real fix always wins. |
+| `ntrip_fallback_lat` / `_lon` | `0.0` | GGA position to use before the first fix (`0` = disabled). Takes priority over the position cache; a real fix always wins. |
+| `ntrip_position_cache` | `~/.ros/here4_last_position.json` | Where the last known position is persisted, to give the VRS a head start on cold boot. `""` disables it. |
 | `rtcm_max_fragments_per_cycle` | `2` | Caps RTCM bursts per spin cycle. See the CAN budget note below — this protects the USB adapter, not the bus. |
 | `rtcm_filter_unsupported` | `true` | Drop RTCM messages the F9P cannot decode instead of putting them on the bus. Set `false` for a different receiver. |
 

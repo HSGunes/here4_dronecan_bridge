@@ -31,6 +31,7 @@ setup(
         "console_scripts": [
             "here4_bridge_node = here4_dronecan_bridge.here4_bridge_node:main",
             "ntrip_test = here4_dronecan_bridge.ntrip_test_cli:main",
+            "set_gps_l5 = here4_dronecan_bridge.set_gps_l5:main",
         ],
     },
 )

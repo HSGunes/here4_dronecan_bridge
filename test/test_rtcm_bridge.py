@@ -47,6 +47,15 @@ def temiz_kuyruk(node):
             break
     node._rtcm_dropped_fragments = 0
     node._last_fix_position = None
+    # Testler birbirini kirletmesin: fallback parametreleri ve önbellek sıfırla
+    node.set_parameters(
+        [
+            rclpy.parameter.Parameter("ntrip_fallback_lat", value=0.0),
+            rclpy.parameter.Parameter("ntrip_fallback_lon", value=0.0),
+        ]
+    )
+    node._position_cache_path = ""
+    node._fallback_position_cached = None
     node._refresh_ntrip_param_cache()
 
 
@@ -323,3 +332,73 @@ def test_gga_kalitesi_cozum_kalitesini_yansitiyor(node, mode, sub_mode, beklenen
     "standalone" gösteriyordu (TKGM destek görüşmesinde kafa karıştırır)."""
     node._handle_gnss_fix2(_FakeEvent(make_fix2(3, mode, sub_mode)))
     assert node._last_fix_position[4] == beklenen_quality
+
+
+# --- Konum önbelleği (soğuk açılış hızlandırma) ---------------------------- #
+# Soğuk açılışta zincir SERİ bekliyor: alıcı fix alsın -> GGA -> VRS üretsin
+# -> RTCM aksın. Son bilinen konumu diskten okuyup GGA'yı hemen göndermek bu
+# beklemeyi kesiyor. Gerçek fix gelince hemen ezilir.
+
+
+def test_konum_onbellegi_diske_yazilip_okunuyor(node, tmp_path):
+    yol = tmp_path / "son_konum.json"
+    node._position_cache_path = str(yol)
+
+    node._last_fix_position = (37.0473, 35.3645, 104.6, 11.0, 4)
+    node._save_cached_position()
+    assert yol.exists(), "kayıt dosyası oluşmalı"
+
+    okunan = node._load_cached_position()
+    assert okunan is not None
+    assert okunan[0] == pytest.approx(37.0473)
+    assert okunan[1] == pytest.approx(35.3645)
+    assert okunan[2] == pytest.approx(104.6)
+    assert okunan[4] == 1, "kalite bilinmiyor -> tek nokta bildirilmeli"
+
+
+def test_konum_onbellegi_bozuk_dosyada_cokmuyor(node, tmp_path):
+    yol = tmp_path / "bozuk.json"
+    yol.write_text("{bu gecerli json degil")
+    node._position_cache_path = str(yol)
+    assert node._load_cached_position() is None
+
+
+def test_konum_onbellegi_olmayan_dosyada_cokmuyor(node, tmp_path):
+    node._position_cache_path = str(tmp_path / "hic_yok.json")
+    assert node._load_cached_position() is None
+
+
+def test_konum_onbellegi_kapatilabiliyor(node, tmp_path):
+    node._position_cache_path = ""
+    node._last_fix_position = (37.0, 35.0, 100.0, 0.0, 4)
+    node._save_cached_position()  # sessizce hiçbir şey yapmamalı
+    assert node._load_cached_position() is None
+    assert not list(tmp_path.iterdir()), "kapalıyken dosya yazılmamalı"
+
+
+def test_acik_parametre_onbellegi_eziyor(node, tmp_path):
+    """ntrip_fallback_lat/lon verilmişse diskteki konum kullanılmaz."""
+    yol = tmp_path / "son_konum.json"
+    yol.write_text('{"lat": 1.0, "lon": 2.0, "alt": 3.0}')
+    node._position_cache_path = str(yol)
+    node._fallback_position_cached = None
+    node.set_parameters(
+        [
+            rclpy.parameter.Parameter("ntrip_fallback_lat", value=41.0),
+            rclpy.parameter.Parameter("ntrip_fallback_lon", value=29.0),
+        ]
+    )
+    node._refresh_ntrip_param_cache()
+    assert node._get_gga_position() == (41.0, 29.0, 100.0, 0.0, 1)
+
+
+def test_gercek_fix_onbellegi_eziyor(node, tmp_path):
+    yol = tmp_path / "son_konum.json"
+    yol.write_text('{"lat": 1.0, "lon": 2.0, "alt": 3.0}')
+    node._position_cache_path = str(yol)
+    node._fallback_position_cached = None
+    node._refresh_ntrip_param_cache()
+    assert node._get_gga_position()[:2] == (1.0, 2.0), "önce önbellek kullanılır"
+
+    node._last_fix_position = (37.5, 35.5, 100.0, 0.0, 4)
+    assert node._get_gga_position()[:2] == (37.5, 35.5), "gerçek fix ezer"

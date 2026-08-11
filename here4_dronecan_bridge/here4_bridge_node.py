@@ -7,6 +7,7 @@
 # and publishes them as standard ROS 2 messages.
 # Acts as a DroneCAN Node ID allocator so Here 4 can join without a Pixhawk.
 
+import json
 import os
 import queue
 import threading
@@ -140,6 +141,15 @@ class Here4BridgeNode(Node):
         # gönderebilmek için: 0.0 = kapalı, gerçek fix gelince otomatik bırakılır.
         self.declare_parameter("ntrip_fallback_lat", 0.0)
         self.declare_parameter("ntrip_fallback_lon", 0.0)
+        # Soguk aciliste zincir SERI bekliyor: alici kendi fix'ini alsin ->
+        # GGA gonderelim -> VRS uretmeye baslasin -> RTCM aksin. Son bilinen
+        # konumu diske yazip acilista fallback olarak kullanirsak VRS daha
+        # alici uyduları ararken akmaya baslar. Gercek fix gelince hemen ezer,
+        # yani bayat konumun tek maliyeti birkac saniyelik yanlis VRS.
+        # Bos string = kalicilastirmayi kapat.
+        self.declare_parameter(
+            "ntrip_position_cache", "~/.ros/here4_last_position.json"
+        )
         # Bir spin turunda gönderilecek azami parça.
         # 28.07.2026: köprüde TX artık AYRI THREAD'de (waveshare bridge), yani
         # 2 ms'lik frame arası bekleme seri OKUMAYI ARTIK DURDURMUYOR — eski
@@ -246,6 +256,9 @@ class Here4BridgeNode(Node):
         # spin thread'inde tazelenip buradan okunur.
         self._filter_unsupported_cached = True
         self._fallback_position_cached = None
+        _cache = self.get_parameter("ntrip_position_cache").value
+        self._position_cache_path = os.path.expanduser(_cache) if _cache else ""
+        self._last_position_save = 0.0
         # GGA için son konum. Tek parça tuple olarak atanır; GIL altında
         # atomik okunur/yazılır, bu yüzden kilide gerek yok.
         self._last_fix_position = None
@@ -364,6 +377,10 @@ class Here4BridgeNode(Node):
                     self._refresh_ntrip_param_cache()
                     self._log_rtcm_status()
 
+                if now - self._last_position_save > 60.0:
+                    self._last_position_save = now
+                    self._save_cached_position()
+
             except Exception:
                 # Ignore transport errors (like toggle bit errors due to CAN frame drops)
                 # Just log as a debug/warn and continue spinning so the node doesn't die.
@@ -421,9 +438,57 @@ class Here4BridgeNode(Node):
         )
         lat = self.get_parameter("ntrip_fallback_lat").value
         lon = self.get_parameter("ntrip_fallback_lon").value
-        self._fallback_position_cached = (
-            (lat, lon, 100.0, 0.0, 1) if (lat != 0.0 or lon != 0.0) else None
+        if lat != 0.0 or lon != 0.0:
+            # Açıkça verilen parametre her zaman önceliklidir.
+            self._fallback_position_cached = (lat, lon, 100.0, 0.0, 1)
+        elif self._fallback_position_cached is None:
+            # Diskteki son bilinen konum (yalnız bir kez okunur).
+            self._fallback_position_cached = self._load_cached_position()
+
+    def _load_cached_position(self):
+        """Diske yazılmış son bilinen konumu okur (yoksa None).
+
+        Soğuk açılışta GGA'yı beklemeden göndermek için; gerçek fix gelir
+        gelmez `_last_fix_position` bunu ezer.
+        """
+        if not self._position_cache_path:
+            return None
+        try:
+            with open(self._position_cache_path) as handle:
+                data = json.load(handle)
+            pos = (
+                float(data["lat"]),
+                float(data["lon"]),
+                float(data.get("alt", 100.0)),
+                0.0,
+                1,  # GGA kalitesi: bilmiyoruz, tek nokta bildir
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+        self.get_logger().info(
+            f"Son bilinen konum yüklendi ({pos[0]:.5f}, {pos[1]:.5f}) — "
+            "VRS ilk fix'i beklemeden akmaya başlayabilir."
         )
+        return pos
+
+    def _save_cached_position(self):
+        """Son fix'i diske yazar (atomik: geçici dosya + rename).
+
+        Araç aniden kapanabildiği için doğrudan yazmak dosyayı bozabilir.
+        """
+        pos = self._last_fix_position
+        if not self._position_cache_path or pos is None:
+            return
+        tmp = self._position_cache_path + ".tmp"
+        try:
+            klasor = os.path.dirname(self._position_cache_path)
+            if klasor:
+                os.makedirs(klasor, exist_ok=True)
+            with open(tmp, "w") as handle:
+                json.dump({"lat": pos[0], "lon": pos[1], "alt": pos[2]}, handle)
+            os.replace(tmp, self._position_cache_path)
+        except OSError:
+            pass  # Kalıcılaştırma en iyi çabadır; başarısızlığı akışı etkilemez
 
     def _get_gga_position(self):
         """NTRIP thread'i için GGA konumu; fix yoksa fallback, o da yoksa None."""
