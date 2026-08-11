@@ -132,6 +132,14 @@ class Here4BridgeNode(Node):
         self.declare_parameter("ntrip_user", "")
         self.declare_parameter("ntrip_password", "")
         self.declare_parameter("ntrip_gga_period", 5.0)
+        # GGA alan 6'da gercek cozum kalitesini bildir (4=FIXED, 5=FLOAT, 2=DGPS).
+        # VARSAYILAN KAPALI ve bilerek: bu alan bize islevsel HICBIR sey
+        # kazandirmiyor (yalniz caster oturum log'unda duzgun gorunuyoruz) ama
+        # VRS'in gordugu girdiyi degistiriyor. 06.08'de acildiktan sonra FIXED
+        # gelmemeye basladi; sebep kanitlanamadi (ayni pencerede duzeltme
+        # uydusu 30->25 dustu, yani ortam da degisti) ama kozmetik bir alan
+        # icin ana islevi riske atmaya degmez. Acmak icin true yap ve olc.
+        self.declare_parameter("ntrip_gga_report_quality", False)
         # Akis bu kadar saniye susarsa oturumu koparip yeniden baglan (0=kapali).
         # 05.08.2026 olcumu: 24 s'lik durak boyunca AYNI caster'a yapilan 5
         # kimliksiz yoklamanin 5'i de 0.19 s'de basarili oldu -> caster ayakta,
@@ -255,6 +263,7 @@ class Here4BridgeNode(Node):
         # atabiliyor; o istisna NTRIP thread'ini olduruyordu. Bu iki deger
         # spin thread'inde tazelenip buradan okunur.
         self._filter_unsupported_cached = True
+        self._gga_report_quality_cached = False
         self._fallback_position_cached = None
         _cache = self.get_parameter("ntrip_position_cache").value
         self._position_cache_path = os.path.expanduser(_cache) if _cache else ""
@@ -435,6 +444,9 @@ class Here4BridgeNode(Node):
         """
         self._filter_unsupported_cached = bool(
             self.get_parameter("rtcm_filter_unsupported").value
+        )
+        self._gga_report_quality_cached = bool(
+            self.get_parameter("ntrip_gga_report_quality").value
         )
         lat = self.get_parameter("ntrip_fallback_lat").value
         lon = self.get_parameter("ntrip_fallback_lon").value
@@ -725,9 +737,10 @@ class Here4BridgeNode(Node):
             if msl_mm and ell_mm:
                 geoid_sep = (ell_mm - msl_mm) / 1e3
             # NMEA GGA kalitesi: 1=SPS, 2=DGPS, 4=RTK FIXED, 5=RTK FLOAT.
-            # Caster bunu düzeltme üretmek için kullanmaz ama oturum log'una
-            # yazar; hep 1 göndermek bizi "standalone" gösteriyordu.
-            if fix_mode == 2:
+            # Varsayilan olarak hep 1 gonderiyoruz (bkz. ntrip_gga_report_quality).
+            if not self._gga_report_quality_cached:
+                gga_quality = 1
+            elif fix_mode == 2:
                 gga_quality = 4 if fix_sub_mode == 1 else 5
             elif fix_mode == 1:
                 gga_quality = 2

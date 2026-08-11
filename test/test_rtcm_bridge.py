@@ -52,6 +52,7 @@ def temiz_kuyruk(node):
         [
             rclpy.parameter.Parameter("ntrip_fallback_lat", value=0.0),
             rclpy.parameter.Parameter("ntrip_fallback_lon", value=0.0),
+            rclpy.parameter.Parameter("ntrip_gga_report_quality", value=False),
         ]
     )
     node._position_cache_path = ""
@@ -198,7 +199,8 @@ def test_gga_konumu_sadece_gecerli_fixte_guncellenir(node):
     assert geoid_sep == pytest.approx(11.0, abs=1e-3), (
         "N, Fix2'nin iki yükseklik alanından hesaplanmalı"
     )
-    assert gga_quality == 4, "RTK FIXED -> NMEA quality 4"
+    # Varsayılan olarak kalite bildirimi KAPALI (bkz. ntrip_gga_report_quality)
+    assert gga_quality == 1, "varsayılanda her zaman 1 gönderilir"
 
 
 def test_fallback_konum_davranisi(node):
@@ -328,10 +330,32 @@ def test_filtre_kapatilabiliyor(node):
     ],
 )
 def test_gga_kalitesi_cozum_kalitesini_yansitiyor(node, mode, sub_mode, beklenen_quality):
-    """GGA alan 6, caster oturum log'larında görünür; hep 1 göndermek bizi
-    "standalone" gösteriyordu (TKGM destek görüşmesinde kafa karıştırır)."""
+    """Parametre AÇIKKEN GGA alan 6 gerçek çözüm kalitesini taşımalı."""
+    node.set_parameters(
+        [rclpy.parameter.Parameter("ntrip_gga_report_quality", value=True)]
+    )
+    node._refresh_ntrip_param_cache()
+    try:
+        node._handle_gnss_fix2(_FakeEvent(make_fix2(3, mode, sub_mode)))
+        assert node._last_fix_position[4] == beklenen_quality
+    finally:
+        node.set_parameters(
+            [rclpy.parameter.Parameter("ntrip_gga_report_quality", value=False)]
+        )
+        node._refresh_ntrip_param_cache()
+
+
+@pytest.mark.parametrize("mode,sub_mode", [(2, 1), (2, 0), (1, 0), (0, 0)])
+def test_gga_kalitesi_varsayilan_olarak_hep_1(node, mode, sub_mode):
+    """VARSAYILAN: her durumda 1 gönder.
+
+    Alan 6'nın bize işlevsel faydası yok ama VRS'in gördüğü girdiyi
+    değiştiriyor; 06.08'de açıldıktan sonra FIXED gelmemeye başladı (sebep
+    kanıtlanamadı, aynı pencerede düzeltme uydusu 30->25 düştü). Kozmetik bir
+    alan için ana işlevi riske atmıyoruz.
+    """
     node._handle_gnss_fix2(_FakeEvent(make_fix2(3, mode, sub_mode)))
-    assert node._last_fix_position[4] == beklenen_quality
+    assert node._last_fix_position[4] == 1
 
 
 # --- Konum önbelleği (soğuk açılış hızlandırma) ---------------------------- #
