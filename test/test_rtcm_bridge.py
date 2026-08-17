@@ -426,3 +426,63 @@ def test_gercek_fix_onbellegi_eziyor(node, tmp_path):
 
     node._last_fix_position = (37.5, 35.5, 100.0, 0.0, 4)
     assert node._get_gga_position()[:2] == (37.5, 35.5), "gerçek fix ezer"
+
+
+# --- Pusula mesaj tipi geçişi (GNSSPeriph 1.15) ----------------------------- #
+# 1.15 pusulayı MagneticFieldStrength2 (tip 1002, sensor_id'li) ile yayınlıyor;
+# eski firmware 1001 kullanıyordu. 06.08.2026: firmware 4.7 -> 1.15 geçişinde
+# /here4/mag sessizce ölmüştü çünkü köprü yalnız 1001 dinliyordu.
+
+
+def _mag2(sensor_id, ga=(0.1, 0.2, 0.3)):
+    m = dronecan.uavcan.equipment.ahrs.MagneticFieldStrength2()
+    m.sensor_id = sensor_id
+    m.magnetic_field_ga = list(ga)
+    return _FakeEvent(m)
+
+
+def test_mag2_secili_sensor_yayinlaniyor(node):
+    yayinlanan = []
+    orijinal = node._pub_mag.publish
+    node._pub_mag.publish = yayinlanan.append
+    try:
+        node._handle_magnetic_field2(_mag2(node._mag_sensor_id))
+    finally:
+        node._pub_mag.publish = orijinal
+
+    assert len(yayinlanan) == 1, "seçili sensör yayınlanmalı"
+    # Gauss -> µT -> Tesla ve FRD -> FLU (Y,Z işaret değişimi).
+    # DSDL alanı float16[3] olduğu için tam eşitlik imkânsız; rel=1e-3
+    # float16'nın ~3 ondalık basamaklık hassasiyetine karşılık gelir.
+    alan = yayinlanan[0].magnetic_field
+    assert alan.x == pytest.approx(0.1 * 100.0 * 1e-6, rel=1e-3)
+    assert alan.y == pytest.approx(-(0.2 * 100.0) * 1e-6, rel=1e-3)
+    assert alan.z == pytest.approx(-(0.3 * 100.0) * 1e-6, rel=1e-3)
+
+
+def test_mag2_baska_sensor_yok_sayiliyor(node):
+    """İki pusula varsa ikisi aynı topic'e karışmamalı."""
+    yayinlanan = []
+    orijinal = node._pub_mag.publish
+    node._pub_mag.publish = yayinlanan.append
+    try:
+        node._handle_magnetic_field2(_mag2(node._mag_sensor_id + 7))
+    finally:
+        node._pub_mag.publish = orijinal
+
+    assert yayinlanan == [], "seçilmeyen sensör yayınlanmamalı"
+    assert (node._mag_sensor_id + 7) in node._mag_ignored_sensors
+
+
+def test_eski_mag_tipi_hala_calisiyor(node):
+    """Geriye uyum: 1001 kullanan eski firmware'de de yayın sürmeli."""
+    m = dronecan.uavcan.equipment.ahrs.MagneticFieldStrength()
+    m.magnetic_field_ga = [0.1, 0.2, 0.3]
+    yayinlanan = []
+    orijinal = node._pub_mag.publish
+    node._pub_mag.publish = yayinlanan.append
+    try:
+        node._handle_magnetic_field(_FakeEvent(m))
+    finally:
+        node._pub_mag.publish = orijinal
+    assert len(yayinlanan) == 1

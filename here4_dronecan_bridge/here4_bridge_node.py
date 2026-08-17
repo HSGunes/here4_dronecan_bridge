@@ -117,6 +117,13 @@ class Here4BridgeNode(Node):
         self.declare_parameter("mag_scale_x", 1.0)
         self.declare_parameter("mag_scale_y", 1.0)
         self.declare_parameter("mag_scale_z", 1.0)
+        # GNSSPeriph 1.15 pusulayi MagneticFieldStrength2 (tip 1002) ile
+        # yayinliyor ve mesaj sensor_id tasiyor ("Send both AKM and RM3100
+        # compass data over CAN" - 1.15 surum notu). Eski firmware (1.12,
+        # AP_Periph 4.7) tip 1001 kullaniyordu, o sensor_id tasimaz.
+        # Kopru ikisini de dinler; 1002 gelirse yalniz bu sensor_id islenir.
+        # 06.08.2026 olcumu: cihazda tek pusula var, sensor_id=0, 80 Hz.
+        self.declare_parameter("mag_sensor_id", 0)
 
         # --- NTRIP / RTK düzeltmesi ---
         # Zincir: caster -> NtripClient thread -> kuyruk -> spin thread ->
@@ -224,6 +231,10 @@ class Here4BridgeNode(Node):
         self._mag_scale_z = (
             self.get_parameter("mag_scale_z").get_parameter_value().double_value
         )
+        self._mag_sensor_id = (
+            self.get_parameter("mag_sensor_id").get_parameter_value().integer_value
+        )
+        self._mag_ignored_sensors = set()
 
         # --- ROS 2 Publishers ---
         self._pub_gps = self.create_publisher(NavSatFix, "/here4/gps/fix", 10)
@@ -335,6 +346,11 @@ class Here4BridgeNode(Node):
         self._dronecan_node.add_handler(
             dronecan.uavcan.equipment.ahrs.MagneticFieldStrength,
             self._handle_magnetic_field,
+        )
+        # GNSSPeriph 1.15+ bu varyanti kullaniyor (sensor_id'li)
+        self._dronecan_node.add_handler(
+            dronecan.uavcan.equipment.ahrs.MagneticFieldStrength2,
+            self._handle_magnetic_field2,
         )
         self._dronecan_node.add_handler(
             dronecan.uavcan.equipment.gnss.Auxiliary,
@@ -850,6 +866,20 @@ class Here4BridgeNode(Node):
         ]
 
         self._pub_imu.publish(msg)
+
+    def _handle_magnetic_field2(self, event):
+        """MagneticFieldStrength2 (tip 1002) -> sensor_msgs/MagneticField.
+
+        GNSSPeriph 1.15 pusulayi bu tiple yayinliyor; eski firmware 1001
+        kullaniyordu. Fark: bu mesaj sensor_id tasiyor (birden fazla pusula
+        destegi). Yalniz secili sensoru isliyoruz, yoksa iki farkli pusula
+        ayni topic'e karisir.
+        """
+        sensor_id = getattr(event.message, "sensor_id", 0)
+        if sensor_id != self._mag_sensor_id:
+            self._mag_ignored_sensors.add(int(sensor_id))
+            return
+        self._handle_magnetic_field(event)
 
     def _handle_magnetic_field(self, event):
         """Convert uavcan.equipment.ahrs.MagneticFieldStrength -> sensor_msgs/MagneticField."""
