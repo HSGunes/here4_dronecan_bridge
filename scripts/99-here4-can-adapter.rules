@@ -1,0 +1,18 @@
+# Waveshare USB-CAN-A (CH340, 1a86:7523) icin iki duzeltme.
+# Kurulum:
+#   sudo cp 99-here4-can-adapter.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+#
+# 1) OTOMATIK ASKIYA ALMA KAPALI
+#    Sistemde usbcore.autosuspend=2 (2 saniye). CH340 cipleri askiya
+#    alinip uyandirilinca seri portta hata verebiliyor; bu da kopruyu
+#    dusuruyordu. Bu adaptor icin guc yonetimini kapatiyoruz.
+ACTION=="add", SUBSYSTEM=="usb", ATTR{idVendor}=="1a86", ATTR{idProduct}=="7523", TEST=="power/control", ATTR{power/control}="on"
+
+# 2) SABIT ISIM
+#    /dev/ttyUSB0 numarasi takma sirasina gore degisiyor (baska bir CH340
+#    veya telefon takilinca kayiyor — bkz. hafiza notu "telefon ttyACM0'i
+#    caliyor"). Sabit sembolik ad veriyoruz ki servis hep dogru porta baglansin.
+#    DIKKAT: aracta birden fazla CH340 varsa bu kural ikisine de uyar;
+#    o durumda ATTRS{serial} ile ayirt et.
+ACTION=="add", SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="ttyUSB-here4"

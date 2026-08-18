@@ -1,0 +1,43 @@
+[Unit]
+# Waveshare USB-CAN <-> vcan koprusu (Here4 GPS/IMU/pusula tasiyicisi).
+#
+# NEDEN: kopru sureci olurse can0 sessizlesir ve Here4'ten HICBIR veri gelmez;
+# saha belirtisi "uzun vadede GPS kopuyor" idi. Kopru artik seri hatalarda
+# kendini toparliyor, bu servis de surecin tamamen olmesine (OOM, cekirdek
+# hatasi, elle kill, yeniden baslatma) karsi ikinci katman.
+#
+# Kurulum:
+#   sudo cp scripts/waveshare-can-bridge.service /etc/systemd/system/
+#   sudo cp scripts/waveshare-can-bridge.env /etc/default/waveshare-can-bridge
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now waveshare-can-bridge
+# Izleme:
+#   systemctl status waveshare-can-bridge
+#   journalctl -u waveshare-can-bridge -f
+Description=Waveshare USB-CAN bridge for Here4 (DroneCAN)
+After=network.target
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/waveshare-can-bridge
+
+# vcan arayuzu yoksa olustur. Kopru gercek bir CAN arayuzu degil, vcan uzerine
+# yaziyor; adaptorle konusan taraf python surecinin kendisi.
+ExecStartPre=/bin/sh -c 'ip link show ${CAN_IF} >/dev/null 2>&1 || { modprobe vcan; ip link add dev ${CAN_IF} type vcan; }'
+ExecStartPre=/bin/sh -c 'ip link set up ${CAN_IF} || true'
+
+ExecStart=/usr/bin/python3 ${BRIDGE} ${SERIAL_PORT} ${CAN_IF} ${CAN_BAUD} ${TX_SLEEP_MS}
+
+# USB adaptor takili degilse surec seri portu bekler; bu normaldir, servisi
+# basarisiz saymayalim.
+Restart=always
+RestartSec=2
+
+# Log kalici yere gitsin — eskiden /tmp'ye gidiyordu ve temizlendigi icin
+# kopmadan SONRA sebebini gorme sansi yoktu.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

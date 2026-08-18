@@ -102,6 +102,51 @@ sudo src/here4_dronecan_bridge/scripts/setup_waveshare_can.sh /dev/ttyUSB0
 
 ---
 
+## 🔁 Keeping the link alive (long-run GPS dropouts)
+
+Field symptom: *"GPS drops out over long runs."* Root cause found by reading the
+bridge, not by guessing — a single serial hiccup used to `break` out of the loop,
+the process exited, and `can0` went silent **permanently**, because
+`setup_waveshare_can.sh` launched it with `nohup … &` and nothing supervised it.
+The log went to `/tmp`, which gets cleared, so the reason was gone by the time
+anyone looked.
+
+Four fixes, in the order they matter:
+
+**1. The bridge now reconnects instead of dying.** Serial errors end the current
+session and reopen the port (with backoff) rather than terminating. Each recovery
+prints `[KOPMA #n] <reason>` so the failure rate is measurable. A dead TX thread
+also ends the session — otherwise you get a one-way bridge that still delivers
+GPS while silently dropping RTCM, which is far harder to diagnose.
+
+**2. systemd supervision** for whatever the bridge itself cannot survive (OOM,
+kill, reboot):
+```bash
+sudo cp scripts/waveshare-can-bridge.service /etc/systemd/system/
+sudo cp scripts/waveshare-can-bridge.env /etc/default/waveshare-can-bridge   # edit paths first
+sudo systemctl daemon-reload && sudo systemctl enable --now waveshare-can-bridge
+journalctl -u waveshare-can-bridge -f
+```
+
+**3. USB autosuspend off + stable device name.** This machine runs
+`usbcore.autosuspend=2`, and CH340 chips are known to misbehave when suspended
+and resumed. The same rule pins the adapter to `/dev/ttyUSB-here4` so it cannot
+shift when another CH340 or a phone is plugged in:
+```bash
+sudo cp scripts/99-here4-can-adapter.rules /etc/udev/rules.d/
+sudo udevadm control --reload && sudo udevadm trigger
+```
+
+**4. Persistent log.** `setup_waveshare_can.sh` now writes to
+`~/.ros/waveshare_bridge.log` and keeps the previous run as `.log.1`.
+
+Still worth checking on the vehicle: the Here 4 needs its **own 5 V supply** (the
+Waveshare adapter does not power the CAN line). We observed a latched
+`IERR 0x800 = watchdog_reset` on the unit, and there is no voltage telemetry in
+ROS, so a brown-out would be invisible.
+
+---
+
 ## 🚀 Installation & Usage
 
 ### 0. Prerequisites

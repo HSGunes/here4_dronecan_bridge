@@ -58,6 +58,23 @@ def configure_adapter(ser, can_baud=0x01, frame_type=0x02, mode=0x00):
     time.sleep(0.1)
 
 
+def seri_ac(port, deneme_max_s=30.0):
+    """Seri portu acar; yoksa/mesgulse geri cekilerek yeniden dener.
+
+    USB adaptor kopup geri geldiginde (titresim, autosuspend, kisa kesinti)
+    /dev/ttyUSB* birkac saniye kaybolabiliyor. Vazgecmek yerine bekliyoruz.
+    """
+    bekleme = 0.5
+    while True:
+        try:
+            return serial.Serial(port, 2000000, timeout=0.01)
+        except Exception as e:
+            print(f"Seri port acilamadi ({port}): {e}; {bekleme:.0f} s sonra tekrar",
+                  file=sys.stderr, flush=True)
+            time.sleep(bekleme)
+            bekleme = min(bekleme * 2.0, deneme_max_s)
+
+
 def main():
     if len(sys.argv) < 3:
         print(f"Usage: {sys.argv[0]} <serial_port> <can_interface>")
@@ -97,24 +114,16 @@ def main():
         )
         sys.exit(1)
 
-    # Setup Serial
-    try:
-        ser = serial.Serial(port, 2000000, timeout=0.01)
-    except Exception as e:
-        print(f"Error opening serial port '{port}': {e}", file=sys.stderr)
-        sys.exit(1)
-
-    # Adaptörü NORMAL moda + doğru bitrate'e al (yoksa silent modda ACK vermez,
-    # Here4 saplanır — bkz. configure_adapter docstring).
-    try:
-        configure_adapter(ser, can_baud=can_baud)
-    except Exception as e:
-        print(f"Adapter yapılandırma hatası: {e}", file=sys.stderr)
-
     print(
         f"Bridging {port} <-> {interface} at 2,000,000 bps (Waveshare proprietary protocol)..."
     )
 
+    # KOPMA DAYANIKLILIGI: eskiden seri hatada `break` ile donguden cikilir,
+    # sureç olur ve can0 SONSUZA DEK sessiz kalirdi — kimse yeniden
+    # baslatmadigi icin (setup script'i "nohup ... &" ile at-ve-unut).
+    # Saha belirtisi: "uzun vadede GPS kopuyor". Artik her seri hatada port
+    # kapatilip yeniden aciliyor ve oturum bastan kuruluyor.
+    kopma_sayisi = 0
     CAN_FRAME_FMT = "=IB3x8s"
     CAN_EFF_FLAG = 0x80000000
     CAN_RTR_FLAG = 0x40000000
@@ -127,8 +136,49 @@ def main():
     # gönderilirken CH340 giriş tamponu taşıp Here4'ten gelen 100 Hz IMU
     # frame'leri düşüyordu (ölçüm: 686 ms'lik IMU boşluğu, tam RTCM anına
     # denk geliyor). Aynı tıkanma RTCM'i de geciktirip RTK FIXED'i yavaşlatıyordu.
+    # --- Dis dongu: her tur bir "oturum" (seri port acik oldugu sure) ---
+    while True:
+        ser = seri_ac(port)
+        # Adaptoru NORMAL moda + dogru bitrate'e al (yoksa silent modda ACK
+        # vermez, Here4 saplanir — bkz. configure_adapter docstring).
+        try:
+            configure_adapter(ser, can_baud=can_baud)
+        except Exception as e:
+            print(f"Adapter yapilandirma hatasi: {e}", file=sys.stderr, flush=True)
+
+        buffer.clear()
+        kopma_sebebi = oturum_calistir(
+            ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT, CAN_EFF_FLAG, CAN_RTR_FLAG
+        )
+        try:
+            ser.close()
+        except Exception:
+            pass
+
+        if kopma_sebebi is None:  # KeyboardInterrupt
+            break
+        kopma_sayisi += 1
+        print(f"[KOPMA #{kopma_sayisi}] {kopma_sebebi} — port yeniden aciliyor",
+              file=sys.stderr, flush=True)
+        time.sleep(0.5)
+
+    can_sock.close()
+
+
+def oturum_calistir(ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT,
+                    CAN_EFF_FLAG, CAN_RTR_FLAG):
+    """Bir seri oturumu calistirir.
+
+    Donus: hata aciklamasi (yeniden baglanilmali) veya None (kullanici durdurdu).
+    Eskiden bu govde main() icindeydi ve hatada sys.exit/break ile sureci
+    olduruyordu; artik yalnizca DONUYOR, cagiran taraf portu yeniden aciyor.
+    """
     tx_stop = threading.Event()
     ser_write_lock = threading.Lock()
+    tx_hata = {"sebep": None}
+    # Ust uste bu kadar okuma hatasi gorulurse gercek kopma sayilir.
+    HATA_TOLERANSI = 5
+    ardisik_hata = 0
 
     def tx_worker():
         while not tx_stop.is_set():
@@ -172,7 +222,7 @@ def main():
                 pass
             except Exception as e:
                 if not tx_stop.is_set():
-                    print(f"TX thread error: {e}", file=sys.stderr)
+                    tx_hata["sebep"] = f"TX thread hatasi: {e}"
                 break
 
     tx_thread = threading.Thread(target=tx_worker, daemon=True)
@@ -180,6 +230,11 @@ def main():
 
     try:
         while True:
+            # TX thread coktuyse oturumu bitir — tek yonlu calisan bir kopru
+            # sessizce yaniltici olur (RTCM gitmez ama RX akmaya devam eder).
+            if tx_hata["sebep"]:
+                return tx_hata["sebep"]
+
             # RX: yalnızca seri portu bekle — TX artık ayrı thread'de.
             r, _, _ = select.select([ser], [], [], 0.05)
 
@@ -191,8 +246,19 @@ def main():
                     if new_data:
                         buffer.extend(new_data)
                 except Exception as e:
-                    print(f"Serial read error: {e}", file=sys.stderr)
-                    break
+                    # "device reports readiness to read but returned no data"
+                    # pyserial'da GECICI bir olaydir (sahte select uyanmasi).
+                    # Her birinde yeniden baglanmak adaptorun CAN denetleyicisini
+                    # surekli sifirlar ve RXD hic yanmaz — 18.08.2026'da tam bu
+                    # oldu. Gercek kopma ustuste hata verir; tolerans o ikisini
+                    # ayirir.
+                    ardisik_hata += 1
+                    if ardisik_hata >= HATA_TOLERANSI:
+                        return f"Seri okuma hatasi ({ardisik_hata} ardisik): {e}"
+                    time.sleep(0.05)
+                    continue
+                else:
+                    ardisik_hata = 0
 
                 # Process all complete packets in the buffer
                 while len(buffer) >= 2:
@@ -251,11 +317,10 @@ def main():
 
     except KeyboardInterrupt:
         print("\nStopping bridge...")
+        return None
     finally:
         tx_stop.set()
         tx_thread.join(timeout=1.0)
-        ser.close()
-        can_sock.close()
 
 
 if __name__ == "__main__":

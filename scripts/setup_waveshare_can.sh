@@ -3,6 +3,24 @@
 # Exit immediately if a command exits with a non-zero status
 set -e
 
+# ÇAKIŞMA KORUMASI — HER ŞEYDEN ÖNCE.
+# systemd servisi köprüyü yönetiyorsa bu betiğin yapacağı hiçbir şey yok.
+# Bu kontrol EN TEPEDE olmak zorunda: aşağıdaki temizlik adımları `can0`ı
+# siliyor ve `pkill` ile köprüyü öldürüyor. Koruma o adımlardan SONRA olursa
+# hasar zaten verilmiş olur — servis `Restart=always` ile geri kalkarken
+# betik de kendi köprüsünü başlatır, aynı seri porta iki süreç erişir,
+# ikisi birbirinin baytlarını çalar, adaptöre iki kez config frame'i gider
+# ve adaptör hiç oturamaz. Belirtisi: "RXD LED'i yanmıyor" + log'da
+# "multiple access on port". 18.08.2026'da tam bu yaşandı.
+if systemctl is-active --quiet waveshare-can-bridge 2>/dev/null; then
+    echo "systemd servisi (waveshare-can-bridge) ZATEN çalışıyor —"
+    echo "bu betiğe gerek yok, hiçbir şey yapılmadı."
+    echo "  İzleme : journalctl -u waveshare-can-bridge -f"
+    echo "  Durum  : systemctl status waveshare-can-bridge"
+    echo "  Devre dışı bırakmak için: sudo systemctl disable --now waveshare-can-bridge"
+    exit 0
+fi
+
 # Port Auto-Detection
 if [ -n "$1" ]; then
     PORT="$1"
@@ -104,14 +122,36 @@ sudo ip link add dev can0 type vcan
 sudo ip link set up can0
 
 # 6. Waveshare <-> SocketCAN Python Köprüsünün başlatılması
+# LOG KALICI YERE: eskiden /tmp'ye yazılıyordu, orası temizlendiği için
+# bir kopma yaşandıktan SONRA sebebini görme şansı yoktu ("uzun vadede GPS
+# kopuyor" teşhisinde tam bu engele takıldık). Artık ~/.ros altında ve
+# döndürülüyor (son iki koşu saklanır).
+# Servis yoksa (koruma en tepede zaten çıkardı): elde kalmış bir köprü varsa
+# yenisini başlatmadan önce onu temizle.
+if pgrep -f "waveshare_socketcan_bridge.py" >/dev/null 2>&1; then
+    echo "   Uyarı: çalışan bir köprü bulundu, yenisini başlatmadan önce durduruluyor."
+    sudo pkill -f "waveshare_socketcan_bridge.py" || true
+    sleep 1
+fi
+
 echo "3. Python SocketCAN Köprüsü arka planda başlatılıyor..."
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
-sudo nohup python3 "$SCRIPT_DIR/waveshare_socketcan_bridge.py" "$PORT" can0 > /tmp/waveshare_bridge.log 2>&1 &
+LOG_DIR="${HOME}/.ros"
+LOG="${LOG_DIR}/waveshare_bridge.log"
+mkdir -p "$LOG_DIR"
+[ -f "$LOG" ] && mv -f "$LOG" "${LOG}.1"
+sudo nohup python3 "$SCRIPT_DIR/waveshare_socketcan_bridge.py" "$PORT" can0 >> "$LOG" 2>&1 &
 
 # 7. Sonuç doğrulaması
 echo "============================================="
 echo "Kurulum başarıyla tamamlandı!"
-echo "Python köprüsü arka planda çalışıyor. Loglar /tmp/waveshare_bridge.log adresinde."
+echo "Python köprüsü arka planda çalışıyor. Loglar: $LOG (bir önceki koşu: ${LOG}.1)"
+echo "NOT: Kalıcı kurulum için systemd servisi önerilir (kopmada otomatik kalkar):"
+echo "  sudo cp $SCRIPT_DIR/waveshare-can-bridge.service /etc/systemd/system/"
+echo "  sudo cp $SCRIPT_DIR/waveshare-can-bridge.env /etc/default/waveshare-can-bridge"
+echo "  sudo cp $SCRIPT_DIR/99-here4-can-adapter.rules /etc/udev/rules.d/"
+echo "  sudo udevadm control --reload && sudo udevadm trigger"
+echo "  sudo systemctl daemon-reload && sudo systemctl enable --now waveshare-can-bridge"
 echo "Arayüz Durumu:"
 ip link show can0
 echo "============================================="
