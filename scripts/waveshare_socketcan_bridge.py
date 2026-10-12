@@ -178,8 +178,10 @@ def main():
               file=sys.stderr, flush=True)
         if istat.get("rx_kare", 0) > 0:
             rx_esik = rx_sessiz_s
-        elif kopma_sebebi.startswith("RX sessiz"):
-            rx_esik = min(rx_esik * 2.0, RX_SESSIZ_MAX_S)
+        elif kopma_sebebi.startswith("RX sessiz") and rx_esik > 0:
+            # Tavan, kullanicinin verdigi esikten kucuk olamaz (60 s verildiyse
+            # katlama onu 30'a DUSURMEMELI).
+            rx_esik = min(rx_esik * 2.0, max(RX_SESSIZ_MAX_S, rx_sessiz_s))
         time.sleep(0.5)
 
     can_sock.close()

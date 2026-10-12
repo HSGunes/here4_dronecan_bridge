@@ -378,12 +378,16 @@ class Here4BridgeNode(Node):
         # düzeltmeler kuyrukta bayatlar (RTCM'in ömrü saniyeler mertebesinde).
         self._start_ntrip_client()
 
-        # --- Spin loop ---
+        self._spin_dongusu()
+        self.get_logger().info("DroneCAN listener thread stopped.")
+
+    def _spin_dongusu(self):
+        """DroneCAN spin döngüsü; _running False olana dek döner."""
         import time
 
         last_led_time = 0.0
         last_rtcm_report = 0.0
-        spin_hata_sayisi = 0
+        self._spin_hata_sayisi = 0
 
         while self._running and rclpy.ok():
             try:
@@ -411,13 +415,12 @@ class Here4BridgeNode(Node):
                 # Transport hatalarında (CAN kare kaybından toggle-bit hatası vb.)
                 # node ölmemeli, spin sürmeli. Ama sessizce yutulmamalı: Here4
                 # susmalarının nedeni hiçbir loga düşmüyordu (issue #173).
-                spin_hata_sayisi += 1
+                self._spin_hata_sayisi += 1
                 self.get_logger().warning(
-                    f"DroneCAN spin hatası (toplam {spin_hata_sayisi}): "
+                    f"DroneCAN spin hatası (toplam {self._spin_hata_sayisi}): "
                     f"{type(e).__name__}: {e}",
                     throttle_duration_sec=5.0,
                 )
-        self.get_logger().info("DroneCAN listener thread stopped.")
 
     # ------------------------------------------------------------------ #
     #  NTRIP -> RTCMStream boru hattı
