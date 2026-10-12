@@ -7,8 +7,6 @@
   <maintainer email="hikmetselcukgunes@gmail.com">gunes</maintainer>
   <license>Apache-2.0</license>
 
-  <buildtool_depend>ament_python</buildtool_depend>
-
   <depend>rclpy</depend>
   <depend>sensor_msgs</depend>
   <depend>std_msgs</depend>
@@ -19,8 +17,13 @@
   <test_depend>python3-pytest</test_depend>
 
   <exec_depend>launch</exec_depend>
-  <!-- NTRIP istemcisi saf stdlib; dronecan köprünün kendisi için gerekli -->
-  <exec_depend>python3-dronecan</exec_depend>
+  <!-- scripts/waveshare_socketcan_bridge.py (USB-CAN seri köprüsü) -->
+  <exec_depend>python3-serial</exec_depend>
+  <!-- NTRIP istemcisi saf stdlib; dronecan köprünün kendisi için gerekli.
+       rosdep dizininde dronecan için anahtar YOK (python3-dronecan çözülmüyor,
+       `rosdep install` -r'siz düşüyordu) → pip ile kurulur:
+         pip install dronecan
+       Anahtar rosdep'e girince buraya <exec_depend> olarak geri eklenmeli. -->
   <export>
     <build_type>ament_python</build_type>
   </export>
