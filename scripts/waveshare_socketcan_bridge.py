@@ -8,6 +8,13 @@ import threading
 import time
 
 
+# RX sessizlik bekcisi (issue #173). 3 s: Here4 akisindaki kendiliginden
+# toparlanan donmalarin (medyan 0.7 s) rahatca ustunde, ama 10 dk'lik turda
+# Here4'u kalici kaybetmekten cok daha kisa.
+RX_SESSIZ_VARSAYILAN_S = 3.0
+RX_SESSIZ_MAX_S = 30.0
+
+
 def configure_adapter(ser, can_baud=0x01, frame_type=0x02, mode=0x00):
     """Waveshare USB-CAN-A 'settings' (CAN Configuration) komutunu gönderir.
 
@@ -98,6 +105,9 @@ def main():
     # 0.5 ms de denendi, ek kazanç görülmedi. Çok düşürmek adaptörde frame
     # kaybı yapabilir (crc_hata / dusen sayaçlarından izlenir).
     tx_sleep = (float(sys.argv[4]) / 1000.0) if len(sys.argv) >= 5 else 0.001
+    # Opsiyonel 5. arg: RX sessizlik bekcisi esigi (s). 0 = kapali. Bkz.
+    # oturum_calistir() — issue #173.
+    rx_sessiz_s = float(sys.argv[5]) if len(sys.argv) >= 6 else RX_SESSIZ_VARSAYILAN_S
 
     # Setup SocketCAN
     try:
@@ -124,6 +134,10 @@ def main():
     # Saha belirtisi: "uzun vadede GPS kopuyor". Artik her seri hatada port
     # kapatilip yeniden aciliyor ve oturum bastan kuruluyor.
     kopma_sayisi = 0
+    # RX sessizliginde ust uste yeniden baglanirken esik ikiye katlanir:
+    # Here4 gercekten enerjisizse adaptoru 3 s'de bir sifirlayip durmayalim.
+    # Bir oturumda tek kare bile gelirse esik basa doner.
+    rx_esik = rx_sessiz_s
     CAN_FRAME_FMT = "=IB3x8s"
     CAN_EFF_FLAG = 0x80000000
     CAN_RTR_FLAG = 0x40000000
@@ -147,8 +161,10 @@ def main():
             print(f"Adapter yapilandirma hatasi: {e}", file=sys.stderr, flush=True)
 
         buffer.clear()
+        istat = {}
         kopma_sebebi = oturum_calistir(
-            ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT, CAN_EFF_FLAG, CAN_RTR_FLAG
+            ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT, CAN_EFF_FLAG, CAN_RTR_FLAG,
+            rx_sessiz_s=rx_esik, istat=istat,
         )
         try:
             ser.close()
@@ -160,19 +176,39 @@ def main():
         kopma_sayisi += 1
         print(f"[KOPMA #{kopma_sayisi}] {kopma_sebebi} — port yeniden aciliyor",
               file=sys.stderr, flush=True)
+        if istat.get("rx_kare", 0) > 0:
+            rx_esik = rx_sessiz_s
+        elif kopma_sebebi.startswith("RX sessiz"):
+            rx_esik = min(rx_esik * 2.0, RX_SESSIZ_MAX_S)
         time.sleep(0.5)
 
     can_sock.close()
 
 
 def oturum_calistir(ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT,
-                    CAN_EFF_FLAG, CAN_RTR_FLAG):
+                    CAN_EFF_FLAG, CAN_RTR_FLAG, rx_sessiz_s=0.0, istat=None):
     """Bir seri oturumu calistirir.
 
     Donus: hata aciklamasi (yeniden baglanilmali) veya None (kullanici durdurdu).
     Eskiden bu govde main() icindeydi ve hatada sys.exit/break ile sureci
     olduruyordu; artik yalnizca DONUYOR, cagiran taraf portu yeniden aciyor.
+
+    RX SESSIZLIK BEKCISI (issue #173): rx_sessiz_s > 0 ise, port acik ve hatasiz
+    oldugu halde bu kadar sure gecerli kare gelmezse oturum "RX sessiz" ile
+    biter. 18.08 sonrasi Here4 olumlerinin hepsi bu tipti: seri hat hata
+    vermiyor, TX (RTCM) akiyor ama RX tamamen sessiz — eski kod yalniz seri
+    hatada/TX coktugunde yeniden baglandigi icin dis dongu hic calismiyordu.
+    Esik, kendiliginden toparlanan kisa donmalarin (>0.3 s bosluklarin medyani
+    0.7 s) ustunde tutulmali. Sayac oturum basindan baslar: hic kare gelmeyen
+    oturum da yakalanir.
+
+    istat verilirse oturum sonunda {"rx_kare", "tx_kare"} ile doldurulur.
     """
+    if istat is None:
+        istat = {}
+    istat["rx_kare"] = 0
+    istat["tx_kare"] = 0
+    son_rx_t = time.monotonic()
     tx_stop = threading.Event()
     ser_write_lock = threading.Lock()
     tx_hata = {"sebep": None}
@@ -214,6 +250,7 @@ def oturum_calistir(ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT,
 
                 with ser_write_lock:
                     ser.write(serial_packet)
+                istat["tx_kare"] += 1
                 # Adaptörün TX tamponunu taşırmamak için gerekli; artık yalnız
                 # bu thread'i bekletiyor, seri okuma etkilenmiyor.
                 if tx_sleep > 0:
@@ -234,6 +271,12 @@ def oturum_calistir(ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT,
             # sessizce yaniltici olur (RTCM gitmez ama RX akmaya devam eder).
             if tx_hata["sebep"]:
                 return tx_hata["sebep"]
+
+            sessiz = time.monotonic() - son_rx_t
+            if rx_sessiz_s > 0 and sessiz > rx_sessiz_s:
+                return (f"RX sessiz: {sessiz:.1f} s gecerli kare yok "
+                        f"(esik {rx_sessiz_s:.1f} s; oturumda RX {istat['rx_kare']}, "
+                        f"TX {istat['tx_kare']} kare)")
 
             # RX: yalnızca seri portu bekle — TX artık ayrı thread'de.
             r, _, _ = select.select([ser], [], [], 0.05)
@@ -314,6 +357,8 @@ def oturum_calistir(ser, can_sock, tx_sleep, buffer, CAN_FRAME_FMT,
 
                     # Consume packet
                     del buffer[:packet_len]
+                    istat["rx_kare"] += 1
+                    son_rx_t = time.monotonic()
 
     except KeyboardInterrupt:
         print("\nStopping bridge...")
