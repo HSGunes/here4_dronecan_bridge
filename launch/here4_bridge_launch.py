@@ -92,8 +92,17 @@ def generate_launch_description():
         "Farklı bir alıcı kullanılırsa false yapılabilir.",
     )
 
+    baro_rate_arg = DeclareLaunchArgument(
+        "baro_rate_hz",
+        default_value="5.0",
+        description="Barometre (basınç + sıcaklık) yayın hızı. Here4 ~75 Hz "
+        "gönderir, canlı abonesi yok, yalnız kayıt dinler (robotaksi_ws#375). "
+        "0 = her mesaj.",
+    )
+
     def setup_node(context):
         from launch_ros.actions import Node
+        from launch_ros.parameter_descriptions import ParameterValue
 
         use_standard = (
             context.launch_configurations.get("use_standard_topics", "true").lower()
@@ -130,6 +139,11 @@ def generate_launch_description():
                         "rtcm_filter_unsupported": LaunchConfiguration(
                             "rtcm_filter_unsupported"
                         ),
+                        # "5" yazilirsa int gelir ve double parametreyle
+                        # tip catisir; her zaman float'a cevir.
+                        "baro_rate_hz": ParameterValue(
+                            LaunchConfiguration("baro_rate_hz"), value_type=float
+                        ),
                     }
                 ],
                 remappings=remappings,
@@ -149,6 +163,7 @@ def generate_launch_description():
             ntrip_fallback_lon_arg,
             rtcm_max_fragments_arg,
             rtcm_filter_arg,
+            baro_rate_arg,
             OpaqueFunction(function=setup_node),
         ]
     )
