@@ -11,6 +11,7 @@ import json
 import os
 import queue
 import threading
+import time
 import logging
 
 import rclpy
@@ -196,6 +197,10 @@ class Here4BridgeNode(Node):
         self.declare_parameter("uere_rtk_fixed", 0.02)
         self.declare_parameter("uere_rtk_float", 0.30)
         self.declare_parameter("uere_dgps", 1.00)
+        # Barometre ~75 Hz geliyor ve canli abonesi yok, yalniz kayit dinliyor
+        # (robotaksi_ws#375: koprunun yayinlarinin ~%48'i). Yayin bu hiza
+        # seyreltilir; 0 (ya da negatif) = her mesaj (eski davranis).
+        self.declare_parameter("baro_rate_hz", 5.0)
 
         self._can_interface = (
             self.get_parameter("can_interface").get_parameter_value().string_value
@@ -235,6 +240,9 @@ class Here4BridgeNode(Node):
             self.get_parameter("mag_sensor_id").get_parameter_value().integer_value
         )
         self._mag_ignored_sensors = set()
+        baro_hz = self.get_parameter("baro_rate_hz").get_parameter_value().double_value
+        self._baro_aralik_s = 1.0 / baro_hz if baro_hz > 0.0 else 0.0
+        self._baro_son = {"basinc": None, "sicaklik": None}
 
         # --- ROS 2 Publishers ---
         self._pub_gps = self.create_publisher(NavSatFix, "/here4/gps/fix", 10)
@@ -383,8 +391,6 @@ class Here4BridgeNode(Node):
 
     def _spin_dongusu(self):
         """DroneCAN spin döngüsü; _running False olana dek döner."""
-        import time
-
         last_led_time = 0.0
         last_rtcm_report = 0.0
         self._spin_hata_sayisi = 0
@@ -929,8 +935,34 @@ class Here4BridgeNode(Node):
 
         self._pub_mag.publish(msg)
 
+    def _baro_yayinlanmali(self, ad, simdi=None):
+        """Barometre yayinini baro_rate_hz'e seyreltir (robotaksi_ws#375).
+
+        Yalniz yayin seyrelir; atlanan mesaj hicbir durum degistirmez.
+        Ilk mesaj her zaman yayinlanir. Damga aralik kadar ilerletilir ki
+        ortalama hiz gelis periyoduna yuvarlanip dusmesin (75 Hz'de 0,2 s
+        esigi her seferinde bir gelis gec asilir); uzun bosluktan sonra
+        damga simdiye cekilir, birikmis yayin patlamasi olmaz.
+        """
+        aralik = self._baro_aralik_s
+        if aralik <= 0.0:
+            return True
+        if simdi is None:
+            simdi = time.monotonic()
+        son = self._baro_son[ad]
+        if son is None:
+            self._baro_son[ad] = simdi
+            return True
+        gecen = simdi - son
+        if gecen < aralik:
+            return False
+        self._baro_son[ad] = son + aralik if gecen < 2.0 * aralik else simdi
+        return True
+
     def _handle_static_pressure(self, event):
         """Convert uavcan.equipment.air_data.StaticPressure -> sensor_msgs/FluidPressure."""
+        if not self._baro_yayinlanmali("basinc"):
+            return
         msg = FluidPressure()
         msg.header = self._make_header("here4_baro_link")
         msg.fluid_pressure = event.message.static_pressure
@@ -939,6 +971,8 @@ class Here4BridgeNode(Node):
 
     def _handle_static_temperature(self, event):
         """Convert uavcan.equipment.air_data.StaticTemperature -> sensor_msgs/Temperature."""
+        if not self._baro_yayinlanmali("sicaklik"):
+            return
         msg = Temperature()
         msg.header = self._make_header("here4_baro_link")
         # DroneCAN temperature is often in Kelvin, so it can be published as is

@@ -353,3 +353,4 @@ follows `Fix2.mode`/`sub_mode`.
 - `/here4/mag` (`sensor_msgs/msg/MagneticField`) - Magnetometer (Compass) Data
 - `/here4/baro/pressure` (`sensor_msgs/msg/FluidPressure`) - Static Air Pressure (If `BARO_ENABLE=1`)
 - `/here4/baro/temperature` (`sensor_msgs/msg/Temperature`) - Internal Sensor Temperature
+- Barometre yayını `baro_rate_hz` parametresiyle seyreltilir (varsayılan 5 Hz; Here4 ~75 Hz gönderir, canlı abonesi yok, yalnız kayıt dinler — robotaksi_ws#375). `0` = her mesaj.
